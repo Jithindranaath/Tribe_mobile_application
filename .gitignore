@@ -1,0 +1,58 @@
+# Dependencies
+node_modules/
+.expo/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+mobile/.env
+
+# Keys and secrets
+_keys/
+*.pem
+
+# IDE
+.vscode/
+.idea/
+
+# Kiro specs
+.kiro/
+
+# Husky
+.husky/
+
+# Build outputs
+dist/
+.next/
+mobile/android/
+mobile/ios/
+mobile/dist/
+program/target/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Documentation files (not needed in public repo)
+architecture.md
+context.md
+pitch.md
+plan.md
+SETUP.md
+spec.md
+navigationbardark.md
+navigationbarlight.md
+MOBILE_IMPLEMENTATION_PLAN.md
+
+# Web application (not needed for mobile repo)
+app/
+
+# Zip files
+*.zip
+
+# Lock files from root
+package-lock.json
+
+# Misc
+*.log
