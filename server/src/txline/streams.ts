@@ -105,7 +105,7 @@ export class TxLINEStreamManager extends EventEmitter {
    */
   async connectScoresStream(): Promise<void> {
     const { txlineApiBaseUrl } = getEnvConfig();
-    const url = `${txlineApiBaseUrl}/api/scores/stream`;
+    const url = `${txlineApiBaseUrl}/scores/stream`;
     await this.connectStream('scores', url, this.handleScoresData.bind(this));
   }
 
@@ -116,7 +116,7 @@ export class TxLINEStreamManager extends EventEmitter {
    */
   async connectOddsStream(): Promise<void> {
     const { txlineApiBaseUrl } = getEnvConfig();
-    const url = `${txlineApiBaseUrl}/api/odds/stream`;
+    const url = `${txlineApiBaseUrl}/odds/stream`;
     await this.connectStream('odds', url, this.handleOddsData.bind(this));
   }
 

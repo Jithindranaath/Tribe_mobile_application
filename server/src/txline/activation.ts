@@ -146,19 +146,39 @@ export class TxLINEActivation {
   }
 
   /**
-   * Returns both authentication headers required for TxLINE data endpoints.
-   *
-   * @returns Object with `Authorization` (Bearer JWT) and `X-Api-Token` headers.
-   * @throws If JWT or API token is not available.
+   * Returns authentication headers required for TxLINE data endpoints.
+   * If JWT is available, sends both. Otherwise just sends X-Api-Token.
    */
-  getAuthHeaders(): { Authorization: string; 'X-Api-Token': string } {
-    const jwt = this.auth.getJWT();
+  getAuthHeaders(): { Authorization?: string; 'X-Api-Token': string } {
     const apiToken = this.getAPIToken();
-
-    return {
-      Authorization: `Bearer ${jwt}`,
+    const headers: { Authorization?: string; 'X-Api-Token': string } = {
       'X-Api-Token': apiToken,
     };
+
+    try {
+      const jwt = this.auth.getJWT();
+      headers.Authorization = `Bearer ${jwt}`;
+    } catch {
+      // JWT not available — send only API token
+    }
+
+    return headers;
+  }
+
+  /**
+   * Loads the API token directly from the TXLINE_API_TOKEN environment variable.
+   * Bypasses the full on-chain subscribe + activate flow.
+   * Use this when you already have a valid token (e.g., from a previous activation).
+   *
+   * @returns true if a token was found in env and loaded, false otherwise.
+   */
+  loadFromEnv(): boolean {
+    const { txlineApiToken } = getEnvConfig();
+    if (txlineApiToken) {
+      this.apiToken = txlineApiToken;
+      return true;
+    }
+    return false;
   }
 
   /**

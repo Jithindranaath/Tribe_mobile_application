@@ -41,7 +41,9 @@ export class TxLINEAuth {
    */
   async acquireGuestJWT(): Promise<GuestJWTResponse> {
     const { txlineApiBaseUrl } = getEnvConfig();
-    const url = `${txlineApiBaseUrl}/auth/guest/start`;
+    // Auth endpoint is at the root, not under /api
+    const baseWithoutApi = txlineApiBaseUrl.replace(/\/api\/?$/, '');
+    const url = `${baseWithoutApi}/auth/guest/start`;
 
     const response = await fetch(url, {
       method: 'POST',
@@ -58,21 +60,25 @@ export class TxLINEAuth {
       );
     }
 
-    const data = (await response.json()) as GuestJWTResponse;
+    const data = (await response.json()) as Record<string, unknown>;
 
-    if (!data.jwt || typeof data.expiresIn !== 'number') {
+    // TxLINE may return { token } or { jwt } with optional expiresIn
+    const jwt = (data.jwt || data.token) as string | undefined;
+    const expiresIn = (data.expiresIn as number) || 3600; // Default 1 hour if not provided
+
+    if (!jwt) {
       throw new Error(
-        '[TxLINEAuth] Malformed response from /auth/guest/start: missing jwt or expiresIn'
+        '[TxLINEAuth] Malformed response from /auth/guest/start: missing jwt/token field'
       );
     }
 
     // Store JWT with an absolute expiration timestamp (ms)
     this.stored = {
-      token: data.jwt,
-      expiresAt: Date.now() + data.expiresIn * 1000,
+      token: jwt,
+      expiresAt: Date.now() + expiresIn * 1000,
     };
 
-    return data;
+    return { jwt, expiresIn };
   }
 
   /**
