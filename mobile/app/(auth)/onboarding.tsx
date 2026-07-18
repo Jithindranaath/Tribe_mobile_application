@@ -2,7 +2,7 @@
  * Onboarding Screen — Three-step flow:
  *   Step 0: Jersey Grid → pick your team (Macro_Tribe)
  *   Step 1: Region Picker → pick your city (Sub_Tribe)
- *   Step 2: Social Login → Google, Apple, or email via Privy
+ *   Step 2: Social Login → Google, Discord, or email via Privy
  *
  * On completion: registers the fan, stores auth data, navigates to Campfire.
  * No blockchain terminology anywhere — feels like a standard sports app signup.

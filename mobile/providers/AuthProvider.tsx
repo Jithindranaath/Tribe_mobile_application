@@ -213,7 +213,7 @@ export function useAuth() {
     const setStoreState = useAuthStore.setState;
 
     const login = useCallback(
-      async (_provider: "google" | "apple" | "email", _email?: string) => {
+      async (_provider: "google" | "discord" | "email", _email?: string) => {
         // In dev mode without Privy, simulate a successful login
         console.warn('[useAuth] Privy not available — simulating login');
         setStoreState({
@@ -263,7 +263,7 @@ export function useAuth() {
   const setStoreState = useAuthStore.setState;
 
   const login = useCallback(
-    async (provider: "google" | "apple" | "email", email?: string) => {
+    async (provider: "google" | "discord" | "email", email?: string) => {
       if (provider === "email") {
         if (!email) throw new Error("Email is required for email login");
         await sendCode({ email });

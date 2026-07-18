@@ -385,6 +385,13 @@ export class TxLINEStreamManager extends EventEmitter {
     const event = JSON.parse(jsonData) as TxLINERawOddsEvent;
     const { fixtureId, ts, market, prices } = event;
 
+    // TxLINE interleaves heartbeat-only messages (e.g. `{"Ts":...}`) with
+    // real odds ticks on this stream. Heartbeats carry no fixtureId/market/
+    // prices — treat them as no-ops rather than a malformed odds event.
+    if (!fixtureId || !market || !prices || typeof prices !== 'object') {
+      return;
+    }
+
     // Store odds tick in database
     await this.storeOddsTick(fixtureId, ts, market, prices);
 

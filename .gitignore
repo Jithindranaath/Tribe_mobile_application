@@ -18,7 +18,7 @@ _keys/
 
 # Kiro specs
 .kiro/
-
+.claude/
 # Husky
 .husky/
 

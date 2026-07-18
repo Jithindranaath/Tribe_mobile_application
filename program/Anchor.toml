@@ -1,11 +1,12 @@
 [toolchain]
+anchor_version = "0.32.1"
 
 [features]
-seeds = false
+resolution = true
 skip-lint = false
 
 [programs.devnet]
-tribe = "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS"
+tribe = "8Yc8JQutXw9rkS1VSYdGEkChGYJhkJKuw64v1CmdN5H8"
 
 [registry]
 url = "https://api.apr.dev"

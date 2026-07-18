@@ -1,7 +1,7 @@
 /**
  * SocialLoginButtons — Social login options for onboarding step 3.
  *
- * Provides Google, Apple, and Email login via the Privy RN SDK.
+ * Provides Google, Discord, and Email login via the Privy RN SDK.
  * The embedded wallet creation is completely invisible to the fan —
  * no crypto terminology, no wallet addresses, no private keys.
  * This looks and feels like a standard social auth experience.
@@ -50,9 +50,9 @@ export function SocialLoginButtons({
     }
   };
 
-  const handleAppleLogin = async () => {
+  const handleDiscordLogin = async () => {
     try {
-      await login("apple");
+      await login("discord");
       onLoginSuccess?.();
     } catch {
       // Error is handled by the auth provider / state
@@ -110,15 +110,15 @@ export function SocialLoginButtons({
             <Text style={styles.googleButtonText}>Continue with Google</Text>
           </Pressable>
 
-          {/* Apple */}
+          {/* Discord */}
           <Pressable
-            onPress={handleAppleLogin}
-            style={styles.appleButton}
-            accessibilityLabel="Continue with Apple"
+            onPress={handleDiscordLogin}
+            style={styles.discordButton}
+            accessibilityLabel="Continue with Discord"
             accessibilityRole="button"
           >
-            <Text style={styles.buttonIcon}>🍎</Text>
-            <Text style={styles.appleButtonText}>Continue with Apple</Text>
+            <Text style={styles.buttonIcon}>🎮</Text>
+            <Text style={styles.discordButtonText}>Continue with Discord</Text>
           </Pressable>
 
           {/* Email */}
@@ -254,10 +254,8 @@ const styles = StyleSheet.create({
     fontWeight: "600",
     color: "#1f2937",
   },
-  appleButton: {
-    backgroundColor: "#000000",
-    borderWidth: 1,
-    borderColor: "#586e75",
+  discordButton: {
+    backgroundColor: "#5865F2",
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
@@ -265,7 +263,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 24,
     borderRadius: 12,
   },
-  appleButtonText: {
+  discordButtonText: {
     fontSize: 16,
     fontWeight: "600",
     color: "#ffffff",
