@@ -6,6 +6,8 @@
 
 import { Router, Request, Response } from 'express';
 import { commitRead } from '../services/reads.js';
+import { getFanById } from '../services/fans.js';
+import { broadcastConviction } from '../services/conviction.js';
 
 const router = Router();
 
@@ -53,11 +55,33 @@ router.post('/commit', async (req: Request, res: Response) => {
       return res.status(409).json(result);
     }
 
+    // Best-effort conviction broadcast — never blocks or fails the commit response.
+    triggerConvictionBroadcast(fanId, readId, fixtureId).catch((err) => {
+      console.error('[Reads] Conviction broadcast failed:', err instanceof Error ? err.message : String(err));
+    });
+
     return res.status(201).json(result);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Internal server error';
     return res.status(500).json({ success: false, error: message });
   }
 });
+
+/**
+ * Resolves the committing fan's tribe, then broadcasts the updated conviction
+ * signal for this readId. Uses cached standing (standing-cache.ts) — no
+ * on-chain RPC call on this path, which matters given the <1s budget
+ * (Requirement 9.5) and that this runs on every commit.
+ */
+async function triggerConvictionBroadcast(
+  fanId: string,
+  readId: string,
+  fixtureId: number,
+): Promise<void> {
+  const fan = await getFanById(fanId);
+  if (!fan) return;
+
+  await broadcastConviction(readId, fixtureId, fan.tribe_id);
+}
 
 export default router;

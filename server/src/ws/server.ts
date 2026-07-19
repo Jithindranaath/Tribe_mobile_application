@@ -7,6 +7,8 @@ import type {
   SurgePayload,
   KeeperInjectPayload,
   ReadPromptPayload,
+  ShareCardReadyPayload,
+  RankUpdatePayload,
 } from './types.js';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -25,6 +27,20 @@ interface ConnectedClient {
 }
 
 /**
+ * Handles a `read_commit` message from a connected client. Injected from
+ * index.ts rather than imported directly — conviction.ts (the natural place
+ * to put this logic) already imports `campfireWS` from this module, so a
+ * direct import here would be circular.
+ */
+export type ReadCommitHandler = (
+  fanId: string,
+  tribeId: string,
+  fixtureId: string,
+  readId: string,
+  predicted: number,
+) => void;
+
+/**
  * Room key format: `${tribeId}:${fixtureId}`
  */
 function roomKey(tribeId: string, fixtureId: string): string {
@@ -38,6 +54,12 @@ export class CampfireWSServer {
   private rooms: Map<string, Set<ConnectedClient>> = new Map();
   private clients: Map<WebSocket, ConnectedClient> = new Map();
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private readCommitHandler: ReadCommitHandler | null = null;
+
+  /** Registers the handler invoked when a client sends a `read_commit` message. */
+  setReadCommitHandler(handler: ReadCommitHandler): void {
+    this.readCommitHandler = handler;
+  }
 
   /**
    * Attach the WebSocket server to an existing HTTP server instance.
@@ -93,13 +115,17 @@ export class CampfireWSServer {
     // Broadcast updated presence count
     this.broadcastPresence(tribeId, fixtureId, this.getPresenceCount(tribeId, fixtureId));
 
-    // Handle incoming messages (pings)
+    // Handle incoming messages (pings, read commits)
     ws.on('message', (data) => {
       try {
         const msg = JSON.parse(data.toString());
         if (msg.type === 'ping') {
           client.lastPing = Date.now();
           ws.send(JSON.stringify({ type: 'pong', timestamp: Date.now() }));
+        } else if (msg.type === 'read_commit') {
+          if (!client.fanId) return; // anonymous connections can't commit reads
+          if (typeof msg.readId !== 'string' || typeof msg.predicted !== 'number') return;
+          this.readCommitHandler?.(client.fanId, client.tribeId, client.fixtureId, msg.readId, msg.predicted);
         }
       } catch {
         // Ignore malformed messages
@@ -237,6 +263,34 @@ export class CampfireWSServer {
       payload: message,
       timestamp: Date.now(),
     });
+  }
+
+  /**
+   * Notify a fan's room that their share card has been generated.
+   */
+  broadcastShareCardReady(tribeId: string, fixtureId: string, payload: ShareCardReadyPayload): void {
+    this.broadcastToTribe(tribeId, fixtureId, {
+      type: 'share_card_ready',
+      payload,
+      timestamp: Date.now(),
+    });
+  }
+
+  /**
+   * Broadcast a tribe rank change to all clients currently connected to that
+   * tribe (across whichever fixture room(s) they're in).
+   */
+  broadcastRankUpdate(tribeId: string, payload: RankUpdatePayload): void {
+    for (const [key, room] of this.rooms.entries()) {
+      if (!key.startsWith(`${tribeId}:`)) continue;
+      const message: OutboundWSMessage = { type: 'rank_update', payload, timestamp: Date.now() };
+      const serialized = JSON.stringify(message);
+      for (const client of room) {
+        if (client.ws.readyState === WebSocket.OPEN) {
+          client.ws.send(serialized);
+        }
+      }
+    }
   }
 
   // ─── Queries ─────────────────────────────────────────────────────────────

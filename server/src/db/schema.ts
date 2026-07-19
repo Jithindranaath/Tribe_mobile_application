@@ -13,6 +13,8 @@ export interface TribesLiveRow {
   tribe_id: string;
   live_presence: number;
   conviction_signal: Record<string, unknown> | null;
+  /** Off-chain cache of TribeAccount.aggregate_standing — see services/onchain.ts. */
+  aggregate_standing: number;
   last_updated: string; // ISO 8601 timestamptz
 }
 
@@ -135,12 +137,38 @@ export type ShareCardsInsert = Omit<ShareCardsRow, 'card_id' | 'created_at'> &
   Partial<Pick<ShareCardsRow, 'card_id' | 'created_at'>>;
 
 // ---------------------------------------------------------------------------
+// fans — social_identity -> wallet_pubkey mapping (registered fans)
+// ---------------------------------------------------------------------------
+
+export interface FansRow {
+  fan_id: string;
+  privy_user_id: string;
+  wallet_pubkey: string;
+  tribe_id: string;
+  tribe_name: string;
+  macro_tribe: string;
+  /** Off-chain cache of FanAccount.standing — see services/onchain.ts. */
+  cached_standing: number;
+  created_at: string; // ISO 8601 timestamptz
+}
+
+export type FansInsert = Omit<FansRow, 'fan_id' | 'created_at' | 'cached_standing'> &
+  Partial<Pick<FansRow, 'fan_id' | 'created_at' | 'cached_standing'>>;
+
+export type FansUpdate = Partial<Omit<FansRow, 'fan_id' | 'created_at'>>;
+
+// ---------------------------------------------------------------------------
 // Supabase Database type helper (for createClient<Database> generic)
 // ---------------------------------------------------------------------------
 
 export interface Database {
   public: {
     Tables: {
+      fans: {
+        Row: FansRow;
+        Insert: FansInsert;
+        Update: FansUpdate;
+      };
       tribes_live: {
         Row: TribesLiveRow;
         Insert: TribesLiveInsert;

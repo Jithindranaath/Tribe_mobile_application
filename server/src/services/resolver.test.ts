@@ -48,7 +48,33 @@ vi.mock('../lib/supabase.js', () => ({
   getSupabaseClient: vi.fn(),
 }));
 
+// Moment-capture dependencies are mocked at module level so existing
+// resolution tests (which don't care about moment capture) aren't affected —
+// getFanById defaults to null, which short-circuits captureNotableMoment
+// before it touches any of the others.
+vi.mock('./fans.js', () => ({
+  getFanById: vi.fn().mockResolvedValue(null),
+}));
+vi.mock('./conviction.js', () => ({
+  getPersistedConvictionSignal: vi.fn().mockResolvedValue(0.5),
+}));
+vi.mock('./moments.js', () => ({
+  classifyMoment: vi.fn().mockReturnValue({ isNotable: false, reasons: [] }),
+  createTimelineEntry: vi.fn().mockResolvedValue(null),
+  computeTimingBonusPercentile: vi.fn().mockResolvedValue(0.5),
+}));
+vi.mock('./share-cards.js', () => ({
+  createShareCard: vi.fn().mockResolvedValue({ cardId: 'card-1', imageUrl: 'https://example.com/card.png', pngBuffer: Buffer.from('') }),
+}));
+vi.mock('../ws/server.js', () => ({
+  campfireWS: { broadcastShareCardReady: vi.fn() },
+}));
+
 import { getSupabaseClient } from '../lib/supabase.js';
+import { getFanById } from './fans.js';
+import { classifyMoment, createTimelineEntry } from './moments.js';
+import { createShareCard } from './share-cards.js';
+import { campfireWS } from '../ws/server.js';
 
 // ─── computeStandingDelta Tests ──────────────────────────────────────────────
 
@@ -581,6 +607,113 @@ describe('ReadResolver', () => {
 
       // Verify the update was called (meaning resolution occurred)
       expect(updateMock).toHaveBeenCalled();
+    });
+  });
+
+  describe('notable moment capture (Requirement 14)', () => {
+    const goalEvent: GoalEvent = {
+      fixtureId: 'fixture-123',
+      seq: 42,
+      timestamp: Date.now(),
+      gameState: '1H',
+      team: 'home',
+    };
+
+    const pendingRead = {
+      read_id: 'read-1',
+      fan_id: 'fan-1',
+      fixture_id: 'fixture-123',
+      read_type: 'moment_read',
+      predicted: 1,
+      odds_at_commit: 3.0,
+      committed_at: new Date(goalEvent.timestamp - 60_000).toISOString(),
+      status: 'pending',
+      resolved: null,
+      txline_seq: null,
+      standing_delta: null,
+      created_at: new Date(goalEvent.timestamp - 60_000).toISOString(),
+    };
+
+    function mockReadsLive() {
+      const updateMock = vi.fn().mockReturnValue({ eq: vi.fn().mockResolvedValue({ error: null }) });
+      const mockFrom = vi.fn().mockImplementation((table: string) => {
+        if (table === 'reads_live') {
+          return {
+            select: vi.fn().mockReturnValue({
+              eq: vi.fn().mockReturnValue({
+                eq: vi.fn().mockReturnValue({
+                  eq: vi.fn().mockResolvedValue({ data: [pendingRead], error: null }),
+                }),
+              }),
+            }),
+            update: updateMock,
+          };
+        }
+        return {};
+      });
+      vi.mocked(getSupabaseClient).mockReturnValue({ from: mockFrom } as any);
+    }
+
+    it('creates a timeline entry and share card when the read is notable', async () => {
+      mockReadsLive();
+      vi.mocked(getFanById).mockResolvedValue({
+        fan_id: 'fan-1',
+        privy_user_id: 'privy-1',
+        wallet_pubkey: 'wallet-1',
+        tribe_id: 'brazil-hyderabad',
+        tribe_name: 'Brazil · Hyderabad',
+        macro_tribe: 'Brazil',
+        cached_standing: 100,
+        created_at: new Date().toISOString(),
+      });
+      vi.mocked(classifyMoment).mockReturnValue({ isNotable: true, reasons: ['high_difficulty'] });
+
+      await resolver.resolveReadsForEvent(goalEvent);
+      // captureNotableMoment is fire-and-forget — flush microtasks
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(createTimelineEntry).toHaveBeenCalledTimes(1);
+      expect(createShareCard).toHaveBeenCalledTimes(1);
+      expect(createShareCard).toHaveBeenCalledWith(
+        expect.objectContaining({ fanId: 'fan-1', tribeName: 'Brazil · Hyderabad' }),
+      );
+      expect(campfireWS.broadcastShareCardReady).toHaveBeenCalledWith(
+        'brazil-hyderabad',
+        'fixture-123',
+        expect.objectContaining({ fanId: 'fan-1', cardId: 'card-1' }),
+      );
+    });
+
+    it('does not create a timeline entry or share card when the read is not notable', async () => {
+      mockReadsLive();
+      vi.mocked(getFanById).mockResolvedValue({
+        fan_id: 'fan-1',
+        privy_user_id: 'privy-1',
+        wallet_pubkey: 'wallet-1',
+        tribe_id: 'brazil-hyderabad',
+        tribe_name: 'Brazil · Hyderabad',
+        macro_tribe: 'Brazil',
+        cached_standing: 100,
+        created_at: new Date().toISOString(),
+      });
+      vi.mocked(classifyMoment).mockReturnValue({ isNotable: false, reasons: [] });
+
+      await resolver.resolveReadsForEvent(goalEvent);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(createTimelineEntry).not.toHaveBeenCalled();
+      expect(createShareCard).not.toHaveBeenCalled();
+    });
+
+    it('skips moment capture entirely when the fan is not found', async () => {
+      mockReadsLive();
+      vi.mocked(getFanById).mockResolvedValue(null);
+
+      await resolver.resolveReadsForEvent(goalEvent);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(classifyMoment).not.toHaveBeenCalled();
+      expect(createTimelineEntry).not.toHaveBeenCalled();
     });
   });
 });

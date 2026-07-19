@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { ReplayManager, type TxLINEFixture, type ReplayManagerOptions } from './replay.js';
+import { ReplayManager, trimToMatchWindow, type TxLINEFixture, type ReplayManagerOptions } from './replay.js';
 import type { TxLINERawScoreEvent } from './normalizer.js';
 import type { TxLINEActivation } from './activation.js';
 
@@ -30,12 +30,10 @@ function createFixture(overrides: Partial<TxLINEFixture> = {}): TxLINEFixture {
 
 function createHistoricalEvent(overrides: Partial<TxLINERawScoreEvent> = {}): TxLINERawScoreEvent {
   return {
-    fixtureId: '12345',
-    seq: 1,
-    ts: 1000,
-    gameState: '1H',
-    homeScore: 0,
-    awayScore: 0,
+    FixtureId: 12345,
+    Seq: 1,
+    Ts: 1000,
+    StatusId: 2, // H1
     ...overrides,
   };
 }
@@ -140,8 +138,8 @@ describe('ReplayManager', () => {
     it('enters replay mode when no live fixture is detected', async () => {
       const processEvent = vi.fn();
       const historicalEvents = [
-        createHistoricalEvent({ ts: 1000, seq: 1 }),
-        createHistoricalEvent({ ts: 2000, seq: 2 }),
+        createHistoricalEvent({ Ts: 1000, Seq: 1 }),
+        createHistoricalEvent({ Ts: 2000, Seq: 2 }),
       ];
 
       const manager = createManager({
@@ -374,9 +372,9 @@ describe('ReplayManager', () => {
       });
 
       const events = [
-        createHistoricalEvent({ ts: 1000, seq: 1, gameState: '1H' }),
-        createHistoricalEvent({ ts: 3000, seq: 2, gameState: '1H' }),
-        createHistoricalEvent({ ts: 6000, seq: 3, gameState: 'HT' }),
+        createHistoricalEvent({ Ts: 1000, Seq: 1 }),
+        createHistoricalEvent({ Ts: 3000, Seq: 2 }),
+        createHistoricalEvent({ Ts: 6000, Seq: 3 }),
       ];
 
       const manager = createManager({
@@ -397,17 +395,17 @@ describe('ReplayManager', () => {
       // First event fires immediately (delay = 0)
       await vi.advanceTimersByTimeAsync(0);
       expect(processedEvents.length).toBe(1);
-      expect(processedEvents[0].seq).toBe(1);
+      expect(processedEvents[0].Seq).toBe(1);
 
       // Second event fires at ts=3000-1000=2000ms
       await vi.advanceTimersByTimeAsync(2000);
       expect(processedEvents.length).toBe(2);
-      expect(processedEvents[1].seq).toBe(2);
+      expect(processedEvents[1].Seq).toBe(2);
 
       // Third event fires at ts=6000-1000=5000ms (already advanced 2000, need 3000 more)
       await vi.advanceTimersByTimeAsync(3000);
       expect(processedEvents.length).toBe(3);
-      expect(processedEvents[2].seq).toBe(3);
+      expect(processedEvents[2].Seq).toBe(3);
 
       manager.shutdown();
     });
@@ -419,8 +417,8 @@ describe('ReplayManager', () => {
       });
 
       const events = [
-        createHistoricalEvent({ ts: 0, seq: 1 }),
-        createHistoricalEvent({ ts: 10_000, seq: 2 }), // 10s real-time gap
+        createHistoricalEvent({ Ts: 0, Seq: 1 }),
+        createHistoricalEvent({ Ts: 10_000, Seq: 2 }), // 10s real-time gap
       ];
 
       const manager = createManager({
@@ -462,9 +460,9 @@ describe('ReplayManager', () => {
     it('does not process events after exitReplayMode is called', async () => {
       const processEvent = vi.fn();
       const events = [
-        createHistoricalEvent({ ts: 0, seq: 1 }),
-        createHistoricalEvent({ ts: 5000, seq: 2 }),
-        createHistoricalEvent({ ts: 10000, seq: 3 }),
+        createHistoricalEvent({ Ts: 0, Seq: 1 }),
+        createHistoricalEvent({ Ts: 5000, Seq: 2 }),
+        createHistoricalEvent({ Ts: 10000, Seq: 3 }),
       ];
 
       const manager = createManager({
@@ -509,9 +507,9 @@ describe('ReplayManager', () => {
     it('cancels all pending event timeouts', async () => {
       const processEvent = vi.fn();
       const events = [
-        createHistoricalEvent({ ts: 0, seq: 1 }),
-        createHistoricalEvent({ ts: 60_000, seq: 2 }),
-        createHistoricalEvent({ ts: 120_000, seq: 3 }),
+        createHistoricalEvent({ Ts: 0, Seq: 1 }),
+        createHistoricalEvent({ Ts: 60_000, Seq: 2 }),
+        createHistoricalEvent({ Ts: 120_000, Seq: 3 }),
       ];
 
       const manager = createManager({
@@ -544,8 +542,8 @@ describe('ReplayManager', () => {
       const manager = createManager({
         fetchFixtures,
         fetchHistoricalData: async () => [
-          createHistoricalEvent({ ts: 0 }),
-          createHistoricalEvent({ ts: 600_000 }), // 10 min later
+          createHistoricalEvent({ Ts: 0 }),
+          createHistoricalEvent({ Ts: 600_000 }), // 10 min later
         ],
         processEvent: async () => {},
       });
@@ -592,5 +590,65 @@ describe('ReplayManager', () => {
       await vi.advanceTimersByTimeAsync(60_000);
       expect(fetchFixtures.mock.calls.length).toBe(callsAfterShutdown);
     });
+  });
+});
+
+describe('trimToMatchWindow', () => {
+  it('trims pre-match and post-match events, keeping only the match window', () => {
+    const events: TxLINERawScoreEvent[] = [
+      { FixtureId: 1, Ts: 1000, StatusId: 1 }, // pre-match (NS)
+      { FixtureId: 1, Ts: 2000, StatusId: 2 }, // kickoff (H1) — window start
+      { FixtureId: 1, Ts: 3000, StatusId: 2 },
+      { FixtureId: 1, Ts: 4000, StatusId: 4 }, // H2
+      { FixtureId: 1, Ts: 5000, StatusId: 5 }, // full-time — window end
+      { FixtureId: 1, Ts: 9000, Action: 'disconnected' }, // post-match noise, no StatusId
+    ];
+
+    const trimmed = trimToMatchWindow(events);
+
+    expect(trimmed.map((e) => e.Ts)).toEqual([2000, 3000, 4000, 5000]);
+  });
+
+  it('extends the window end to the last final-status event when there are multiple', () => {
+    const events: TxLINERawScoreEvent[] = [
+      { FixtureId: 1, Ts: 1000, StatusId: 2 },
+      { FixtureId: 1, Ts: 2000, StatusId: 5 },
+      { FixtureId: 1, Ts: 3000, StatusId: 5 }, // final status repeated later — should extend window
+    ];
+
+    const trimmed = trimToMatchWindow(events);
+
+    expect(trimmed.map((e) => e.Ts)).toEqual([1000, 2000, 3000]);
+  });
+
+  it('falls back to the full event list when no recognizable start status exists', () => {
+    const events: TxLINERawScoreEvent[] = [
+      { FixtureId: 1, Ts: 1000, Action: 'coverage_update' },
+      { FixtureId: 1, Ts: 2000, Action: 'comment' },
+    ];
+
+    expect(trimToMatchWindow(events)).toEqual(events);
+  });
+
+  it('falls back to the full event list when no recognizable end status exists', () => {
+    const events: TxLINERawScoreEvent[] = [
+      { FixtureId: 1, Ts: 1000, StatusId: 2 },
+      { FixtureId: 1, Ts: 2000, StatusId: 4 },
+    ];
+
+    expect(trimToMatchWindow(events)).toEqual(events);
+  });
+
+  it('handles extra time: uses ET1 as a valid start and FET as a valid end', () => {
+    const events: TxLINERawScoreEvent[] = [
+      { FixtureId: 1, Ts: 1000, StatusId: 1 }, // pre-match
+      { FixtureId: 1, Ts: 2000, StatusId: 7 }, // ET1 kickoff
+      { FixtureId: 1, Ts: 3000, StatusId: 10 }, // FET — extra-time final whistle
+      { FixtureId: 1, Ts: 4000, Action: 'disconnected' }, // post-match noise
+    ];
+
+    const trimmed = trimToMatchWindow(events);
+
+    expect(trimmed.map((e) => e.Ts)).toEqual([2000, 3000]);
   });
 });

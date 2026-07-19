@@ -5,14 +5,32 @@ import { config } from 'dotenv';
 import { randomUUID } from 'node:crypto';
 import { campfireWS } from './ws/server.js';
 import readsRouter from './routes/reads.js';
+import authRouter from './routes/auth.js';
 import { TxLINEAuth } from './txline/auth.js';
 import { TxLINEActivation } from './txline/activation.js';
 import { TxLINEStreamManager } from './txline/streams.js';
 import { JWTRefreshLoop } from './txline/refresh-loop.js';
+import { ReplayManager } from './txline/replay.js';
+import { resetScoresCacheForFixture } from './txline/normalizer.js';
 import { eventBus, GOAL_EVENT, RED_CARD_EVENT, STATE_CHANGE_EVENT, ODDS_SHIFT_EVENT } from './events/event-bus.js';
 import { KeeperEvaluator } from './keeper/evaluator.js';
 import { KeeperInjectService } from './keeper/injects.js';
 import { generateContextualReadPrompt, MatchContext } from './keeper/contextual.js';
+import { ReadResolver } from './services/resolver.js';
+import { SettlementQueue } from './services/settlement.js';
+import { SettlementExecutor } from './services/settler.js';
+import { buildSurgePayload } from './services/surge.js';
+import { PresenceService } from './services/presence.js';
+import { checkAndGrantSeerTitle } from './services/titles.js';
+import { commitRead } from './services/reads.js';
+import { getFanById } from './services/fans.js';
+import { getOrCreateTribeAccount } from './services/onchain.js';
+import { broadcastConviction } from './services/conviction.js';
+import { registerPrompt, getPromptMeta, clearExpiredPrompts } from './services/prompt-registry.js';
+import { rankService } from './services/rank.js';
+import { setCachedTribeAggregateStanding } from './services/standing-cache.js';
+import { getSupabaseClient } from './lib/supabase.js';
+import type { TribeData } from './services/rank.js';
 import type { ReadPromptPayload } from './ws/types.js';
 import type { GoalEvent, RedCardEvent, StateChangeEvent, OddsShiftEvent } from './events/event-bus.js';
 
@@ -36,6 +54,11 @@ interface MatchState {
 }
 
 const matchStates = new Map<string, MatchState>();
+
+// ─── Replay Manager (module-scoped so the manual demo trigger route below
+// can reach the same instance the live pipeline creates) ───────────────────
+
+let replayManager: ReplayManager | null = null;
 
 /**
  * Get or initialize a match state for a fixture.
@@ -74,6 +97,7 @@ app.get('/health', (_req, res) => {
 // ─── Routes ────────────────────────────────────────────────────────────────
 
 app.use('/api/reads', readsRouter);
+app.use('/api/auth', authRouter);
 
 // Demo broadcast endpoint (dev only — allows simulation script to push events)
 app.post('/api/demo/broadcast', (req, res) => {
@@ -83,6 +107,63 @@ app.post('/api/demo/broadcast', (req, res) => {
   }
   campfireWS.broadcastToTribe(tribeId, fixtureId, event);
   return res.json({ success: true, recipients: campfireWS.getPresenceCount(tribeId, fixtureId) });
+});
+
+// Manual historical replay trigger (dev only). The automatic fixture-discovery
+// path (checkFixtureAvailability/selectReplayFixture) calls a GET /fixtures
+// endpoint that doesn't exist on the real TxLINE API — this bypasses it and
+// replays a *specific*, known-good fixtureId directly through
+// streamHistoricalEvents(), which runs events through the exact same
+// normalizeScoreEvent() → event bus path as the live scores stream.
+app.post('/api/demo/replay', async (req, res) => {
+  const { fixtureId, playbackSpeed } = req.body;
+  if (!fixtureId) {
+    return res.status(400).json({ error: 'Missing fixtureId' });
+  }
+  if (!replayManager) {
+    return res.status(503).json({ error: 'Replay manager not initialized — TxLINE pipeline may not have started (check TXLINE_API_TOKEN)' });
+  }
+  if (replayManager.isReplayActive) {
+    return res.status(409).json({ error: `Replay already active for fixture ${replayManager.currentFixtureId}` });
+  }
+  // Always set explicitly — the ReplayManager instance is shared/module-scoped, so a
+  // prior call's speed (e.g. an accelerated smoke test) otherwise silently persists into
+  // a later call that omits playbackSpeed, making a "real-time" request actually replay
+  // at whatever speed the last call happened to use.
+  replayManager.setPlaybackSpeed(playbackSpeed !== undefined ? Number(playbackSpeed) : 1);
+
+  // Re-replaying the same fixtureId in the same process (e.g. an accelerated smoke test
+  // followed by a real-time run) would otherwise diff/accumulate against the previous
+  // run's leftover final state — reset both the goal-detection cache (normalizer.ts) and
+  // the displayed match state (homeScore/awayScore accumulator) so each run starts fresh.
+  resetScoresCacheForFixture(String(fixtureId));
+  matchStates.delete(String(fixtureId));
+
+  console.log(`[TRIBE] Manual replay triggered for fixture ${fixtureId} at ${playbackSpeed ?? 1}x speed`);
+  replayManager.streamHistoricalEvents(String(fixtureId)).catch((err) => {
+    console.error('[TRIBE] Replay stream failed:', err instanceof Error ? err.message : String(err));
+  });
+
+  return res.json({ success: true, fixtureId: String(fixtureId), playbackSpeed: playbackSpeed ?? 1 });
+});
+
+app.post('/api/demo/replay/stop', (_req, res) => {
+  if (!replayManager) {
+    return res.status(503).json({ error: 'Replay manager not initialized' });
+  }
+  replayManager.exitReplayMode();
+  return res.json({ success: true });
+});
+
+app.get('/api/demo/replay/status', (_req, res) => {
+  if (!replayManager) {
+    return res.json({ initialized: false });
+  }
+  return res.json({
+    initialized: true,
+    isReplayActive: replayManager.isReplayActive,
+    currentFixtureId: replayManager.currentFixtureId,
+  });
 });
 
 // ─── Match state update endpoint (set team names for a fixture) ────────────
@@ -132,6 +213,14 @@ async function startTxLINEPipeline(): Promise<void> {
   }
   console.log('[TRIBE] ✓ API token loaded from environment');
 
+  // 2b. Create the ReplayManager now, using the same activation instance, so
+  // /api/demo/replay can trigger a historical replay through the same
+  // normalizeScoreEvent() → event bus path as the live scores stream. Not
+  // started automatically (its own fixture-discovery polling is broken —
+  // see progress notes) — only the manual trigger route uses it.
+  replayManager = new ReplayManager({ activation, playbackSpeed: 1 });
+  console.log('[TRIBE] ✓ Replay manager ready (manual trigger via POST /api/demo/replay)');
+
   // 3. Start JWT refresh loop only if JWT was acquired
   if (jwtAcquired) {
     const refreshLoop = new JWTRefreshLoop(auth, {
@@ -173,6 +262,105 @@ async function startTxLINEPipeline(): Promise<void> {
   // 6. Create KeeperInjectService → hook into evaluator
   const injectService = new KeeperInjectService(evaluator, campfireWS, tribeIdResolver);
   console.log('[TRIBE] ✓ Keeper inject service started');
+
+  // 6b. Wire the Read resolution → surge → settlement pipeline.
+  // GOAL_EVENT → ReadResolver resolves pending reads_live rows → surge broadcast
+  // (immediate, <500ms) + queued for batched on-chain settlement.
+  const resolver = new ReadResolver(eventBus);
+  const settlementQueue = new SettlementQueue();
+  const settlementExecutor = new SettlementExecutor();
+
+  settlementQueue.setOnBatchReady((batch) => {
+    settlementExecutor.executeBatch(batch).catch((err) => {
+      console.error('[TRIBE] Unexpected settlement error:', err instanceof Error ? err.message : String(err));
+    });
+  });
+
+  // After each settled batch, check Seer-title eligibility per fan (hook point
+  // per titles.ts's own docstring: "after each FanAccount settlement").
+  settlementExecutor.setOnSettled((batch) => {
+    for (const resolution of batch) {
+      checkAndGrantSeerTitle(resolution.fanId).catch((err) => {
+        console.error('[TRIBE] Seer title check failed:', err instanceof Error ? err.message : String(err));
+      });
+    }
+  });
+
+  resolver.onResolution((fixtureId, resolutions) => {
+    if (resolutions.length === 0) return;
+
+    // Immediate surge broadcast to every tribe currently watching this fixture.
+    // Reads aren't tribe-scoped in reads_live, so (matching broadcastMatchHeader's
+    // existing pattern) the same resolution set is broadcast to every active tribe
+    // room for this fixture rather than filtered per-tribe.
+    const payload = buildSurgePayload(fixtureId, resolutions);
+    if (payload) {
+      for (const tribeId of tribeIdResolver(fixtureId)) {
+        campfireWS.broadcastSurge(tribeId, fixtureId, payload);
+      }
+    }
+
+    // Queue for batched on-chain settlement (60s window or 20 items, whichever first).
+    settlementQueue.queue(resolutions);
+  });
+
+  resolver.start();
+  console.log('[TRIBE] ✓ Read resolver + settlement pipeline started');
+
+  // 6c. Presence: periodic broadcast + DB sync (complements the WS server's
+  // own connect/disconnect broadcasts — see presence.ts docstring).
+  const presenceService = new PresenceService(campfireWS);
+  presenceService.startPeriodicBroadcast();
+  console.log('[TRIBE] ✓ Presence service started');
+
+  // 6d. Tribe rank cron. RankService is pure in-memory with no data source of
+  // its own (setTribes()/computeRanks() must be driven externally) — and the
+  // on-chain TribeAccount only stores numeric macro_id/region_id, which the
+  // FNV-1a hash that produced them isn't invertible back to the string
+  // tribeId needed for WS room broadcasting. So the *set* of tribes comes
+  // from the `fans` table (every tribe that exists came from a fan
+  // registering into it, which preserves the string id), and each tribe's
+  // current aggregate_standing comes from a fresh on-chain fetch.
+  await refreshTribeRanks();
+  setInterval(() => {
+    refreshTribeRanks().catch((err) => {
+      console.error('[TRIBE] Rank refresh failed:', err instanceof Error ? err.message : String(err));
+    });
+  }, 60_000);
+  console.log('[TRIBE] ✓ Rank service started');
+
+  // 6e. WS read_commit handler: mirrors the REST /api/reads/commit path, but the
+  // WS message only carries {readId, predicted} — readType/oddsAtCommit come from
+  // the prompt-registry entry recorded when the prompt was broadcast (see below).
+  campfireWS.setReadCommitHandler((fanId, tribeId, fixtureId, readId, predicted) => {
+    const meta = getPromptMeta(readId);
+    if (!meta) {
+      console.warn(`[TRIBE] WS read_commit for unknown/expired readId ${readId} — ignoring`);
+      return;
+    }
+
+    commitRead({
+      readId,
+      fanId,
+      fixtureId: Number(meta.fixtureId),
+      readType: meta.readType,
+      predicted,
+      oddsAtCommit: meta.oddsAtCommit,
+    })
+      .then((result) => {
+        if (!result.success) return;
+        return getFanById(fanId).then((fan) => {
+          if (!fan) return;
+          return broadcastConviction(readId, Number(meta.fixtureId), fan.tribe_id);
+        });
+      })
+      .catch((err) => {
+        console.error('[TRIBE] WS read_commit handling failed:', err instanceof Error ? err.message : String(err));
+      });
+  });
+
+  // Periodic cleanup of expired prompt-registry entries.
+  setInterval(clearExpiredPrompts, 60_000);
 
   // 7. Wire event bus listeners for match state updates + broadcasts
 
@@ -268,6 +456,15 @@ async function startTxLINEPipeline(): Promise<void> {
           expiresAt: Date.now() + 60_000, // 60 seconds to answer
         };
 
+        // Record metadata so a WS read_commit (which only carries {readId,
+        // predicted}) can be resolved back to readType/oddsAtCommit/fixtureId.
+        registerPrompt(readPrompt.readId, {
+          fixtureId: decision.fixtureId,
+          readType: readPrompt.readType,
+          oddsAtCommit: readPrompt.difficultyMultiplier,
+          expiresAt: readPrompt.expiresAt,
+        });
+
         // Broadcast to all tribes watching this fixture
         const tribeIds = tribeIdResolver(decision.fixtureId);
         for (const tribeId of tribeIds) {
@@ -285,6 +482,64 @@ async function startTxLINEPipeline(): Promise<void> {
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
+
+/**
+ * Refreshes RankService's tribe data from the `fans` table (source of the
+ * string tribeId — see rankService wiring comment above) + fresh on-chain
+ * aggregate_standing per tribe, recomputes ranks, and broadcasts a
+ * `rank_update` to any tribe whose rank changed since the last refresh
+ * (Requirement 13.3: animate rank change within 5s of update).
+ */
+async function refreshTribeRanks(): Promise<void> {
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase.from('fans').select('tribe_id, macro_tribe');
+
+  if (error || !data) {
+    if (error) console.error('[TRIBE] Rank refresh: failed to list tribes:', error.message);
+    return;
+  }
+
+  const uniqueTribes = new Map<string, string>(); // tribeId -> macroTribe
+  for (const row of data as Array<{ tribe_id: string; macro_tribe: string }>) {
+    uniqueTribes.set(row.tribe_id, row.macro_tribe);
+  }
+
+  const previousRanks = new Map(rankService.getAllRanks().map((r) => [r.tribeId, r.rank]));
+
+  const tribeData: TribeData[] = [];
+  for (const [tribeId, macroTribe] of uniqueTribes) {
+    try {
+      const tribe = await getOrCreateTribeAccount(tribeId, macroTribe);
+      tribeData.push({
+        tribeId,
+        macroId: tribe.macroId,
+        regionId: tribe.regionId,
+        aggregateStanding: tribe.aggregateStanding,
+      });
+
+      // Reconciliation: this cron is the only place that re-fetches real
+      // on-chain aggregate_standing (settlement/registration update the cache
+      // event-driven; this catches any drift for free, at zero extra RPC cost).
+      await setCachedTribeAggregateStanding(tribeId, tribe.aggregateStanding);
+    } catch (err) {
+      console.error(`[TRIBE] Rank refresh: failed to fetch tribe ${tribeId}:`, err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  rankService.setTribes(tribeData);
+  rankService.computeRanks();
+
+  for (const entry of rankService.getAllRanks()) {
+    const prev = previousRanks.get(entry.tribeId);
+    if (prev !== undefined && prev !== entry.rank) {
+      campfireWS.broadcastRankUpdate(entry.tribeId, {
+        tribeId: entry.tribeId,
+        rank: entry.rank,
+        previousRank: prev,
+      });
+    }
+  }
+}
 
 /**
  * Broadcast a match header update to all connected tribes for a fixture.

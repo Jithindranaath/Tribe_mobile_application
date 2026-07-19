@@ -17,8 +17,8 @@ import type { SurgePayload } from '../ws/types.js';
 describe('buildSurgePayload', () => {
   it('should return null when no resolutions have correct reads', () => {
     const resolutions: Resolution[] = [
-      { fanId: 'fan-1', readId: 'read-1', correct: false, standingDelta: -5, txLineSeq: 10 },
-      { fanId: 'fan-2', readId: 'read-2', correct: false, standingDelta: -5, txLineSeq: 10 },
+      { fanId: 'fan-1', readId: 'read-1', correct: false, standingDelta: -5, txLineSeq: 10, fixtureId: 'fixture-123', readType: 'moment_read', predicted: 1, resolved: 1 },
+      { fanId: 'fan-2', readId: 'read-2', correct: false, standingDelta: -5, txLineSeq: 10, fixtureId: 'fixture-123', readType: 'moment_read', predicted: 1, resolved: 1 },
     ];
 
     const result = buildSurgePayload('fixture-123', resolutions);
@@ -32,8 +32,8 @@ describe('buildSurgePayload', () => {
 
   it('should build payload when at least one read is correct', () => {
     const resolutions: Resolution[] = [
-      { fanId: 'fan-1', readId: 'read-1', correct: true, standingDelta: 200, txLineSeq: 42 },
-      { fanId: 'fan-2', readId: 'read-2', correct: false, standingDelta: -5, txLineSeq: 42 },
+      { fanId: 'fan-1', readId: 'read-1', correct: true, standingDelta: 200, txLineSeq: 42, fixtureId: 'fixture-123', readType: 'moment_read', predicted: 1, resolved: 1 },
+      { fanId: 'fan-2', readId: 'read-2', correct: false, standingDelta: -5, txLineSeq: 42, fixtureId: 'fixture-123', readType: 'moment_read', predicted: 1, resolved: 1 },
     ];
 
     const result = buildSurgePayload('fixture-123', resolutions);
@@ -46,9 +46,9 @@ describe('buildSurgePayload', () => {
 
   it('should include ALL standing deltas (correct and incorrect)', () => {
     const resolutions: Resolution[] = [
-      { fanId: 'fan-1', readId: 'read-1', correct: true, standingDelta: 240, txLineSeq: 42 },
-      { fanId: 'fan-2', readId: 'read-2', correct: false, standingDelta: -5, txLineSeq: 42 },
-      { fanId: 'fan-3', readId: 'read-3', correct: true, standingDelta: 300, txLineSeq: 42 },
+      { fanId: 'fan-1', readId: 'read-1', correct: true, standingDelta: 240, txLineSeq: 42, fixtureId: 'fixture-123', readType: 'moment_read', predicted: 1, resolved: 1 },
+      { fanId: 'fan-2', readId: 'read-2', correct: false, standingDelta: -5, txLineSeq: 42, fixtureId: 'fixture-123', readType: 'moment_read', predicted: 1, resolved: 1 },
+      { fanId: 'fan-3', readId: 'read-3', correct: true, standingDelta: 300, txLineSeq: 42, fixtureId: 'fixture-123', readType: 'moment_read', predicted: 1, resolved: 1 },
     ];
 
     const result = buildSurgePayload('fixture-123', resolutions);
@@ -63,7 +63,7 @@ describe('buildSurgePayload', () => {
 
   it('should build payload with single correct read', () => {
     const resolutions: Resolution[] = [
-      { fanId: 'fan-1', readId: 'read-1', correct: true, standingDelta: 100, txLineSeq: 5 },
+      { fanId: 'fan-1', readId: 'read-1', correct: true, standingDelta: 100, txLineSeq: 5, fixtureId: 'fixture-123', readType: 'moment_read', predicted: 1, resolved: 1 },
     ];
 
     const result = buildSurgePayload('fixture-999', resolutions);
@@ -104,7 +104,7 @@ describe('SurgeService', () => {
 
     it('should not broadcast when no reads are correct', () => {
       const resolutions: Resolution[] = [
-        { fanId: 'fan-1', readId: 'read-1', correct: false, standingDelta: -5, txLineSeq: 10 },
+        { fanId: 'fan-1', readId: 'read-1', correct: false, standingDelta: -5, txLineSeq: 10, fixtureId: 'fixture-123', readType: 'moment_read', predicted: 1, resolved: 1 },
       ];
 
       surgeService.triggerSurge('fixture-123', resolutions);
@@ -114,8 +114,8 @@ describe('SurgeService', () => {
 
     it('should broadcast surge when at least one read is correct', () => {
       const resolutions: Resolution[] = [
-        { fanId: 'fan-1', readId: 'read-1', correct: true, standingDelta: 200, txLineSeq: 42 },
-        { fanId: 'fan-2', readId: 'read-2', correct: false, standingDelta: -5, txLineSeq: 42 },
+        { fanId: 'fan-1', readId: 'read-1', correct: true, standingDelta: 200, txLineSeq: 42, fixtureId: 'fixture-123', readType: 'moment_read', predicted: 1, resolved: 1 },
+        { fanId: 'fan-2', readId: 'read-2', correct: false, standingDelta: -5, txLineSeq: 42, fixtureId: 'fixture-123', readType: 'moment_read', predicted: 1, resolved: 1 },
       ];
 
       surgeService.triggerSurge('fixture-123', resolutions);
@@ -138,7 +138,7 @@ describe('SurgeService', () => {
 
     it('should resolve tribeId from fixtureId', () => {
       const resolutions: Resolution[] = [
-        { fanId: 'fan-1', readId: 'read-1', correct: true, standingDelta: 100, txLineSeq: 1 },
+        { fanId: 'fan-1', readId: 'read-1', correct: true, standingDelta: 100, txLineSeq: 1, fixtureId: 'fixture-123', readType: 'moment_read', predicted: 1, resolved: 1 },
       ];
 
       surgeService.triggerSurge('fixture-456', resolutions);
@@ -150,7 +150,7 @@ describe('SurgeService', () => {
       tribeIdResolver.mockReturnValue(null);
 
       const resolutions: Resolution[] = [
-        { fanId: 'fan-1', readId: 'read-1', correct: true, standingDelta: 150, txLineSeq: 7 },
+        { fanId: 'fan-1', readId: 'read-1', correct: true, standingDelta: 150, txLineSeq: 7, fixtureId: 'fixture-123', readType: 'moment_read', predicted: 1, resolved: 1 },
       ];
 
       surgeService.triggerSurge('fixture-unknown', resolutions);
@@ -160,9 +160,9 @@ describe('SurgeService', () => {
 
     it('should include all fan deltas in broadcast payload', () => {
       const resolutions: Resolution[] = [
-        { fanId: 'fan-a', readId: 'read-a', correct: true, standingDelta: 300, txLineSeq: 50 },
-        { fanId: 'fan-b', readId: 'read-b', correct: true, standingDelta: 240, txLineSeq: 50 },
-        { fanId: 'fan-c', readId: 'read-c', correct: false, standingDelta: -5, txLineSeq: 50 },
+        { fanId: 'fan-a', readId: 'read-a', correct: true, standingDelta: 300, txLineSeq: 50, fixtureId: 'fixture-123', readType: 'moment_read', predicted: 1, resolved: 1 },
+        { fanId: 'fan-b', readId: 'read-b', correct: true, standingDelta: 240, txLineSeq: 50, fixtureId: 'fixture-123', readType: 'moment_read', predicted: 1, resolved: 1 },
+        { fanId: 'fan-c', readId: 'read-c', correct: false, standingDelta: -5, txLineSeq: 50, fixtureId: 'fixture-123', readType: 'moment_read', predicted: 1, resolved: 1 },
       ];
 
       surgeService.triggerSurge('fixture-789', resolutions);
@@ -185,7 +185,7 @@ describe('SurgeService', () => {
       };
 
       const resolutions: Resolution[] = [
-        { fanId: 'fan-1', readId: 'read-1', correct: true, standingDelta: 100, txLineSeq: 1 },
+        { fanId: 'fan-1', readId: 'read-1', correct: true, standingDelta: 100, txLineSeq: 1, fixtureId: 'fixture-123', readType: 'moment_read', predicted: 1, resolved: 1 },
       ];
 
       callback('fixture-100', resolutions);

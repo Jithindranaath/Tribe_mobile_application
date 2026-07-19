@@ -39,6 +39,41 @@ const HIGH_PROFILE_TEAMS = [
   'England', 'Italy', 'Netherlands', 'Portugal', 'Belgium',
 ];
 
+/** StatusId values indicating the match is actually in play (soccer-feed.mdx phase encoding). */
+const MATCH_START_STATUS_IDS = new Set([2, 7]); // H1, ET1 — the two ways a match can "start"
+/** StatusId values indicating the match has reached a final outcome. */
+const MATCH_END_STATUS_IDS = new Set([5, 10, 13, 100]); // F, FET, FPE, game_finalised
+
+/**
+ * Trims a raw historical event log to the actual match window (kickoff to
+ * final whistle). The raw historical feed includes hours of pre-match
+ * coverage setup and post-match idle/disconnect events — a real fixture's
+ * log can span 80+ hours even though the match itself lasts ~90-140 minutes.
+ * Replaying the untrimmed log at real-time speed would take that entire
+ * span; trimming to the actual match window is what makes "real-time replay"
+ * mean "paced like the real match," not "paced like the raw log."
+ *
+ * Falls back to the full, untrimmed event list if no recognizable
+ * start/end StatusId is found (e.g. synthetic test fixtures).
+ */
+export function trimToMatchWindow(events: TxLINERawScoreEvent[]): TxLINERawScoreEvent[] {
+  const startTimes = events
+    .filter((e) => e.StatusId !== undefined && MATCH_START_STATUS_IDS.has(e.StatusId))
+    .map((e) => e.Ts ?? Infinity);
+  const endTimes = events
+    .filter((e) => e.StatusId !== undefined && MATCH_END_STATUS_IDS.has(e.StatusId))
+    .map((e) => e.Ts ?? -Infinity);
+
+  if (startTimes.length === 0 || endTimes.length === 0) {
+    return events;
+  }
+
+  const startTs = Math.min(...startTimes);
+  const endTs = Math.max(...endTimes);
+
+  return events.filter((e) => e.Ts !== undefined && e.Ts >= startTs && e.Ts <= endTs);
+}
+
 // ─── Interfaces ──────────────────────────────────────────────────────────────
 
 /**
@@ -106,6 +141,15 @@ export class ReplayManager {
   /** The fixtureId currently being replayed, or null if not in replay mode. */
   get currentFixtureId(): string | null {
     return this._currentFixtureId;
+  }
+
+  /**
+   * Overrides the playback speed multiplier (1 = real-time). Only takes
+   * effect for replays started after this call — does not retime an
+   * already-scheduled replay.
+   */
+  setPlaybackSpeed(speed: number): void {
+    this.playbackSpeed = speed;
   }
 
   // ─── Core Methods ────────────────────────────────────────────────────────
@@ -232,24 +276,39 @@ export class ReplayManager {
    * Requirements 3.3, 3.4: GET historical data, stream through same event bus.
    */
   async streamHistoricalEvents(fixtureId: string): Promise<void> {
-    const events = await this._fetchHistoricalData(fixtureId);
+    const rawEvents = await this._fetchHistoricalData(fixtureId);
 
-    if (!events || events.length === 0) {
+    if (!rawEvents || rawEvents.length === 0) {
       console.warn(`[ReplayManager] No historical events found for fixture ${fixtureId}`);
       this.exitReplayMode();
       return;
     }
 
+    // Trim pre-match coverage setup / post-match idle time — see
+    // trimToMatchWindow's docstring for why this matters for real-time replay.
+    const events = trimToMatchWindow(rawEvents);
+    console.log(
+      `[ReplayManager] Trimmed ${rawEvents.length} raw events to ${events.length} within the match window`,
+    );
+
+    // Set active state here (not just in enterReplayMode) so callers that invoke
+    // this method directly — e.g. the manual /api/demo/replay trigger, which
+    // bypasses enterReplayMode's fixture auto-selection — still get a correctly
+    // armed _isReplayActive flag. Each scheduled event below is a no-op unless
+    // this is true.
+    this._currentFixtureId = fixtureId;
+    this._isReplayActive = true;
+
     // Sort events by timestamp to ensure correct ordering
-    const sorted = [...events].sort((a, b) => a.ts - b.ts);
+    const sorted = [...events].sort((a, b) => (a.Ts ?? 0) - (b.Ts ?? 0));
 
     // Calculate base timestamp (first event) for relative timing
-    const baseTimestamp = sorted[0].ts;
+    const baseTimestamp = sorted[0].Ts ?? 0;
 
     // Schedule each event with original time spacing, adjusted by playback speed
     for (let i = 0; i < sorted.length; i++) {
       const event = sorted[i];
-      const relativeDelay = (event.ts - baseTimestamp) / this.playbackSpeed;
+      const relativeDelay = ((event.Ts ?? 0) - baseTimestamp) / this.playbackSpeed;
 
       const timeout = setTimeout(async () => {
         if (!this._isReplayActive) return;
@@ -353,7 +412,9 @@ export class ReplayManager {
    */
   private async defaultFetchFixtures(): Promise<TxLINEFixture[]> {
     const { txlineApiBaseUrl } = getEnvConfig();
-    const url = `${txlineApiBaseUrl}/api/fixtures`;
+    // txlineApiBaseUrl already includes /api (e.g. https://txline-dev.txodds.com/api) —
+    // do not add another /api segment here.
+    const url = `${txlineApiBaseUrl}/fixtures`;
 
     const headers = this.activation.getAuthHeaders();
 
@@ -382,7 +443,8 @@ export class ReplayManager {
    */
   private async defaultFetchHistoricalData(fixtureId: string): Promise<TxLINERawScoreEvent[]> {
     const { txlineApiBaseUrl } = getEnvConfig();
-    const url = `${txlineApiBaseUrl}/api/scores/historical/${fixtureId}`;
+    // txlineApiBaseUrl already includes /api — do not add another /api segment here.
+    const url = `${txlineApiBaseUrl}/scores/historical/${fixtureId}`;
 
     const headers = this.activation.getAuthHeaders();
 
@@ -401,7 +463,42 @@ export class ReplayManager {
       );
     }
 
-    const data = await response.json() as TxLINERawScoreEvent[];
-    return data;
+    // The historical endpoint returns `text/event-stream` SSE-formatted content
+    // (`data: {...}` blocks) even though it's a complete, non-live response —
+    // NOT a JSON array. Parse it the same way as the live SSE stream.
+    const bodyText = await response.text();
+    return parseHistoricalScoreEvents(bodyText);
   }
+}
+
+// ─── SSE Body Parsing (historical endpoint) ─────────────────────────────────
+
+/**
+ * Parses a complete SSE-formatted response body (`data: {...}` blocks
+ * separated by blank lines) into an array of raw score events. Skips
+ * heartbeat-only entries that carry no FixtureId.
+ */
+function parseHistoricalScoreEvents(body: string): TxLINERawScoreEvent[] {
+  const events: TxLINERawScoreEvent[] = [];
+
+  for (const block of body.split(/\r?\n\r?\n/)) {
+    for (const line of block.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) continue;
+
+      const jsonStr = trimmed.slice(5).trim();
+      if (!jsonStr) continue;
+
+      try {
+        const parsed = JSON.parse(jsonStr) as TxLINERawScoreEvent;
+        if (parsed.FixtureId !== undefined) {
+          events.push(parsed);
+        }
+      } catch {
+        // Skip malformed lines
+      }
+    }
+  }
+
+  return events;
 }

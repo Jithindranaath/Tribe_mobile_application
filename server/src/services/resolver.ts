@@ -15,6 +15,11 @@ import {
 } from '../events/event-bus.js';
 import { getSupabaseClient } from '../lib/supabase.js';
 import type { ReadsLiveRow } from '../db/schema.js';
+import { getFanById } from './fans.js';
+import { classifyMoment, createTimelineEntry, computeTimingBonusPercentile } from './moments.js';
+import { createShareCard } from './share-cards.js';
+import { getPersistedConvictionSignal } from './conviction.js';
+import { campfireWS } from '../ws/server.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -24,6 +29,11 @@ export interface Resolution {
   correct: boolean;
   standingDelta: number;
   txLineSeq: number;
+  /** Fields needed by on-chain settlement (settle_read instruction args). */
+  fixtureId: string;
+  readType: string;
+  predicted: number;
+  resolved: number;
 }
 
 // ─── Pure Computation ────────────────────────────────────────────────────────
@@ -183,12 +193,29 @@ export class ReadResolver {
         continue;
       }
 
+      // Best-effort: notable-moment capture + share card generation for correct
+      // reads. Never blocks or fails resolution — fire-and-forget.
+      if (correct) {
+        const timingBonus = Math.min(2.0, 1.0 + secondsEarly / 300);
+        this.captureNotableMoment(
+          { ...read, resolved: actualOutcome, status: 'resolved', standing_delta: standingDelta },
+          event.fixtureId,
+          timingBonus,
+        ).catch((err) => {
+          console.error('[ReadResolver] Moment capture failed:', err instanceof Error ? err.message : String(err));
+        });
+      }
+
       resolutions.push({
         fanId: read.fan_id,
         readId: read.read_id,
         correct,
         standingDelta,
         txLineSeq: event.seq,
+        fixtureId: read.fixture_id.toString(),
+        readType: read.read_type,
+        predicted: read.predicted,
+        resolved: actualOutcome,
       });
     }
 
@@ -197,5 +224,60 @@ export class ReadResolver {
     );
 
     return resolutions;
+  }
+
+  /**
+   * Classifies a correctly-resolved read as a notable moment (Requirement 14),
+   * and if notable, creates the Legacy timeline entry + share card.
+   */
+  private async captureNotableMoment(
+    read: ReadsLiveRow,
+    fixtureIdStr: string,
+    timingBonus: number,
+  ): Promise<void> {
+    const fixtureId = Number(fixtureIdStr);
+
+    const fan = await getFanById(read.fan_id);
+    if (!fan) return;
+
+    // Conviction signal at resolution time — best-effort; defaults to neutral
+    // (0.5) if nothing has been persisted yet for this tribe (see conviction.ts).
+    const convictionSignal = await getPersistedConvictionSignal(fan.tribe_id);
+
+    const timingBonusPercentile = await computeTimingBonusPercentile(
+      read.read_type,
+      timingBonus,
+      read.read_id,
+    );
+
+    const classification = classifyMoment(read, convictionSignal, timingBonusPercentile);
+    if (!classification.isNotable) return;
+
+    await createTimelineEntry(read, fixtureId, classification.reasons);
+
+    const secondsEarly = Math.max(
+      0,
+      (Date.now() - new Date(read.committed_at).getTime()) / 1000,
+    );
+
+    const cardResult = await createShareCard({
+      fanId: read.fan_id,
+      fixtureId,
+      // reads_live has no question-text column, so the original prompt text
+      // can't be reconstructed — using a synthesized call text as a documented
+      // fallback rather than guessing at the real question.
+      callText: `Called: ${read.predicted === 1 ? 'YES' : 'NO'}`,
+      outcome: 'correct',
+      timing: `${Math.round(secondsEarly)}s early`,
+      difficulty: read.odds_at_commit ?? 1.0,
+      standingDelta: read.standing_delta ?? 0,
+      tribeName: fan.tribe_name,
+    });
+
+    campfireWS.broadcastShareCardReady(fan.tribe_id, fixtureIdStr, {
+      fanId: read.fan_id,
+      cardId: cardResult.cardId,
+      imageUrl: cardResult.imageUrl,
+    });
   }
 }

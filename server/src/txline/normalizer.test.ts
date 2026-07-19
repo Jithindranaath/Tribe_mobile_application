@@ -1,6 +1,10 @@
 /**
  * Unit tests for TxLINE scores stream event normalizer.
  * Validates: Requirements 2.5, 2.6, 2.7
+ *
+ * Fixtures use the real TxLINE payload shape (PascalCase, per-action, Stats-keyed —
+ * captured from the live SSE stream and the historical endpoint), not the flat
+ * camelCase shape the normalizer was originally (incorrectly) written against.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -27,6 +31,22 @@ vi.mock('../lib/supabase.js', () => ({
   getSupabaseClient: () => ({ from: mockFrom }),
 }));
 
+// ─── Fixture Builder ─────────────────────────────────────────────────────────
+
+function makeEvent(overrides: Partial<TxLINERawScoreEvent> = {}): TxLINERawScoreEvent {
+  return {
+    FixtureId: 12345,
+    Seq: 10,
+    Ts: 1700000000,
+    StatusId: 2, // H1
+    Participant1IsHome: true,
+    Participant1Id: 1,
+    Participant2Id: 2,
+    Stats: { '1': 0, '2': 0, '5': 0, '6': 0 },
+    ...overrides,
+  };
+}
+
 // ─── Test Setup ──────────────────────────────────────────────────────────────
 
 describe('normalizeScoreEvent', () => {
@@ -41,187 +61,176 @@ describe('normalizeScoreEvent', () => {
     eventBus.removeAllListeners();
   });
 
+  // ─── Heartbeat Guard ─────────────────────────────────────────────────────
+
+  describe('heartbeat handling', () => {
+    it('is a no-op for heartbeat messages with no FixtureId', async () => {
+      const goalEvents: GoalEvent[] = [];
+      eventBus.on(GOAL_EVENT, (e) => goalEvents.push(e));
+
+      await normalizeScoreEvent({ Ts: 1700000000 });
+
+      expect(goalEvents).toHaveLength(0);
+      expect(mockFrom).not.toHaveBeenCalled();
+    });
+  });
+
   // ─── Goal Detection ────────────────────────────────────────────────────────
 
   describe('Goal event normalization (Requirement 2.5)', () => {
-    it('emits GOAL_EVENT when incidents array contains a goal', async () => {
+    it('does NOT emit GOAL_EVENT on the first event seen for a fixture (no baseline yet)', async () => {
       const events: GoalEvent[] = [];
       eventBus.on(GOAL_EVENT, (e) => events.push(e));
 
-      const raw: TxLINERawScoreEvent = {
-        fixtureId: '12345',
-        seq: 10,
-        ts: 1700000000,
-        gameState: '1H',
-        homeScore: 1,
-        awayScore: 0,
-        incidents: [{ type: 'goal', team: 'home', player: 'Neymar' }],
-      };
+      await normalizeScoreEvent(makeEvent({ Stats: { '1': 1, '2': 0, '5': 0, '6': 0 } }));
 
-      await normalizeScoreEvent(raw);
+      expect(events).toHaveLength(0);
+    });
+
+    it('emits GOAL_EVENT for home when Participant1 (home) total goals increases', async () => {
+      setPreviousScore('12345', 0, 0);
+
+      const events: GoalEvent[] = [];
+      eventBus.on(GOAL_EVENT, (e) => events.push(e));
+
+      await normalizeScoreEvent(
+        makeEvent({
+          Seq: 11,
+          Ts: 1700000100,
+          Participant1IsHome: true,
+          Stats: { '1': 1, '2': 0, '5': 0, '6': 0 },
+        }),
+      );
 
       expect(events).toHaveLength(1);
       expect(events[0]).toEqual({
         fixtureId: '12345',
-        seq: 10,
-        timestamp: 1700000000,
-        gameState: '1H',
+        seq: 11,
+        timestamp: 1700000100,
+        gameState: 'H1',
         team: 'home',
-        player: 'Neymar',
       });
     });
 
-    it('emits GOAL_EVENT when homeScore increases (score-change detection)', async () => {
+    it('emits GOAL_EVENT for away when Participant2 (away) total goals increases', async () => {
       setPreviousScore('12345', 0, 0);
 
       const events: GoalEvent[] = [];
       eventBus.on(GOAL_EVENT, (e) => events.push(e));
 
-      const raw: TxLINERawScoreEvent = {
-        fixtureId: '12345',
-        seq: 11,
-        ts: 1700000100,
-        gameState: '1H',
-        homeScore: 1,
-        awayScore: 0,
-      };
-
-      await normalizeScoreEvent(raw);
-
-      expect(events).toHaveLength(1);
-      expect(events[0].team).toBe('home');
-    });
-
-    it('emits GOAL_EVENT when awayScore increases', async () => {
-      setPreviousScore('12345', 0, 0);
-
-      const events: GoalEvent[] = [];
-      eventBus.on(GOAL_EVENT, (e) => events.push(e));
-
-      const raw: TxLINERawScoreEvent = {
-        fixtureId: '12345',
-        seq: 12,
-        ts: 1700000200,
-        gameState: '1H',
-        homeScore: 0,
-        awayScore: 1,
-      };
-
-      await normalizeScoreEvent(raw);
+      await normalizeScoreEvent(
+        makeEvent({
+          Seq: 12,
+          Ts: 1700000200,
+          Participant1IsHome: true,
+          Stats: { '1': 0, '2': 1, '5': 0, '6': 0 },
+        }),
+      );
 
       expect(events).toHaveLength(1);
       expect(events[0].team).toBe('away');
     });
 
-    it('does NOT emit GOAL_EVENT when scores are unchanged', async () => {
-      setPreviousScore('12345', 1, 0);
-
-      const events: GoalEvent[] = [];
-      eventBus.on(GOAL_EVENT, (e) => events.push(e));
-
-      const raw: TxLINERawScoreEvent = {
-        fixtureId: '12345',
-        seq: 13,
-        ts: 1700000300,
-        gameState: '1H',
-        homeScore: 1,
-        awayScore: 0,
-      };
-
-      await normalizeScoreEvent(raw);
-
-      expect(events).toHaveLength(0);
-    });
-
-    it('prefers incidents array over score-change detection for player info', async () => {
+    it('flips home/away mapping when Participant1IsHome is false', async () => {
       setPreviousScore('12345', 0, 0);
 
       const events: GoalEvent[] = [];
       eventBus.on(GOAL_EVENT, (e) => events.push(e));
 
-      const raw: TxLINERawScoreEvent = {
-        fixtureId: '12345',
-        seq: 14,
-        ts: 1700000400,
-        gameState: '1H',
-        homeScore: 1,
-        awayScore: 0,
-        incidents: [{ type: 'goal', team: 'home', player: 'Mbappé' }],
-      };
-
-      await normalizeScoreEvent(raw);
+      await normalizeScoreEvent(
+        makeEvent({
+          Participant1IsHome: false,
+          Stats: { '1': 1, '2': 0, '5': 0, '6': 0 },
+        }),
+      );
 
       expect(events).toHaveLength(1);
-      expect(events[0].player).toBe('Mbappé');
+      expect(events[0].team).toBe('away'); // Participant1 scored but is the away side
+    });
+
+    it('does NOT emit GOAL_EVENT when goal stats are unchanged', async () => {
+      setPreviousScore('12345', 1, 0);
+
+      const events: GoalEvent[] = [];
+      eventBus.on(GOAL_EVENT, (e) => events.push(e));
+
+      await normalizeScoreEvent(makeEvent({ Stats: { '1': 1, '2': 0, '5': 0, '6': 0 } }));
+
+      expect(events).toHaveLength(0);
+    });
+
+    it('emits one GOAL_EVENT per goal when the stat jumps by more than 1', async () => {
+      setPreviousScore('12345', 0, 0);
+
+      const events: GoalEvent[] = [];
+      eventBus.on(GOAL_EVENT, (e) => events.push(e));
+
+      await normalizeScoreEvent(makeEvent({ Stats: { '1': 2, '2': 0, '5': 0, '6': 0 } }));
+
+      expect(events).toHaveLength(2);
     });
   });
 
   // ─── Red Card Detection ────────────────────────────────────────────────────
 
   describe('Red card event normalization (Requirement 2.6)', () => {
-    it('emits RED_CARD_EVENT when incidents contain a red card', async () => {
+    it('does NOT emit RED_CARD_EVENT on the first event seen for a fixture', async () => {
       const events: RedCardEvent[] = [];
       eventBus.on(RED_CARD_EVENT, (e) => events.push(e));
 
-      const raw: TxLINERawScoreEvent = {
-        fixtureId: '12345',
-        seq: 20,
-        ts: 1700001000,
-        gameState: '2H',
-        homeScore: 1,
-        awayScore: 1,
-        incidents: [{ type: 'red_card', team: 'away', player: 'Ramos' }],
-      };
+      await normalizeScoreEvent(makeEvent({ Stats: { '1': 0, '2': 0, '5': 1, '6': 0 } }));
 
-      await normalizeScoreEvent(raw);
+      expect(events).toHaveLength(0);
+    });
+
+    it('emits RED_CARD_EVENT when P1 total red cards increases', async () => {
+      setPreviousScore('12345', 0, 0, 0, 0);
+
+      const events: RedCardEvent[] = [];
+      eventBus.on(RED_CARD_EVENT, (e) => events.push(e));
+
+      await normalizeScoreEvent(
+        makeEvent({ Seq: 20, Ts: 1700001000, StatusId: 4, Stats: { '1': 0, '2': 0, '5': 1, '6': 0 } }),
+      );
 
       expect(events).toHaveLength(1);
       expect(events[0]).toEqual({
         fixtureId: '12345',
         seq: 20,
         timestamp: 1700001000,
-        gameState: '2H',
-        player: 'Ramos',
+        gameState: 'H2',
       });
     });
 
-    it('emits multiple RED_CARD_EVENTs when multiple red cards in one event', async () => {
+    it('emits RED_CARD_EVENT when P2 total red cards increases', async () => {
+      setPreviousScore('12345', 0, 0, 0, 0);
+
       const events: RedCardEvent[] = [];
       eventBus.on(RED_CARD_EVENT, (e) => events.push(e));
 
-      const raw: TxLINERawScoreEvent = {
-        fixtureId: '12345',
-        seq: 21,
-        ts: 1700001100,
-        gameState: '2H',
-        homeScore: 1,
-        awayScore: 1,
-        incidents: [
-          { type: 'red_card', team: 'home', player: 'PlayerA' },
-          { type: 'red_card', team: 'away', player: 'PlayerB' },
-        ],
-      };
+      await normalizeScoreEvent(makeEvent({ Stats: { '1': 0, '2': 0, '5': 0, '6': 1 } }));
 
-      await normalizeScoreEvent(raw);
+      expect(events).toHaveLength(1);
+    });
+
+    it('emits two RED_CARD_EVENTs when both sides get a card in the same event', async () => {
+      setPreviousScore('12345', 0, 0, 0, 0);
+
+      const events: RedCardEvent[] = [];
+      eventBus.on(RED_CARD_EVENT, (e) => events.push(e));
+
+      await normalizeScoreEvent(makeEvent({ Stats: { '1': 0, '2': 0, '5': 1, '6': 1 } }));
 
       expect(events).toHaveLength(2);
     });
 
-    it('does NOT emit RED_CARD_EVENT for yellow cards', async () => {
+    it('does NOT emit RED_CARD_EVENT when red card stats are unchanged', async () => {
+      setPreviousScore('12345', 0, 0, 1, 0);
+
       const events: RedCardEvent[] = [];
       eventBus.on(RED_CARD_EVENT, (e) => events.push(e));
 
-      const raw: TxLINERawScoreEvent = {
-        fixtureId: '12345',
-        seq: 22,
-        ts: 1700001200,
-        gameState: '1H',
-        homeScore: 0,
-        awayScore: 0,
-        incidents: [{ type: 'yellow_card', team: 'home', player: 'Casemiro' }],
-      };
-
-      await normalizeScoreEvent(raw);
+      await normalizeScoreEvent(makeEvent({ Stats: { '1': 0, '2': 0, '5': 1, '6': 0 } }));
 
       expect(events).toHaveLength(0);
     });
@@ -230,63 +239,58 @@ describe('normalizeScoreEvent', () => {
   // ─── State Change Detection ────────────────────────────────────────────────
 
   describe('State change event normalization (Requirement 2.7)', () => {
-    it('emits STATE_CHANGE_EVENT for HT gameState', async () => {
+    it('does NOT emit STATE_CHANGE_EVENT on the first event seen for a fixture', async () => {
       const events: StateChangeEvent[] = [];
       eventBus.on(STATE_CHANGE_EVENT, (e) => events.push(e));
 
-      const raw: TxLINERawScoreEvent = {
-        fixtureId: '12345',
-        seq: 30,
-        ts: 1700002000,
-        gameState: 'HT',
-        homeScore: 1,
-        awayScore: 0,
-      };
+      await normalizeScoreEvent(makeEvent({ StatusId: 3 })); // HT
 
-      await normalizeScoreEvent(raw);
-
-      expect(events).toHaveLength(1);
-      expect(events[0]).toEqual({
-        fixtureId: '12345',
-        seq: 30,
-        timestamp: 1700002000,
-        newGameState: 'HT',
-      });
+      expect(events).toHaveLength(0);
     });
 
-    it.each(['2H', 'FT', 'ET', 'PEN'])('emits STATE_CHANGE_EVENT for %s gameState', async (state) => {
+    it.each([
+      [3, 'HT'],
+      [4, 'H2'],
+      [5, 'F'],
+      [7, 'ET1'],
+      [9, 'ET2'],
+      [12, 'PE'],
+      [100, 'FINISHED'],
+    ])('emits STATE_CHANGE_EVENT on transition into statusId %i (%s)', async (statusId, phase) => {
+      setPreviousScore('99999', 0, 0, 0, 0, 2); // baseline: H1
+
       const events: StateChangeEvent[] = [];
       eventBus.on(STATE_CHANGE_EVENT, (e) => events.push(e));
 
-      const raw: TxLINERawScoreEvent = {
-        fixtureId: '99999',
-        seq: 31,
-        ts: 1700003000,
-        gameState: state,
-        homeScore: 0,
-        awayScore: 0,
-      };
-
-      await normalizeScoreEvent(raw);
+      await normalizeScoreEvent(
+        makeEvent({ FixtureId: 99999, Seq: 31, Ts: 1700003000, StatusId: statusId }),
+      );
 
       expect(events).toHaveLength(1);
-      expect(events[0].newGameState).toBe(state);
+      expect(events[0].newGameState).toBe(phase);
     });
 
-    it('does NOT emit STATE_CHANGE_EVENT for 1H gameState', async () => {
+    it('does NOT emit STATE_CHANGE_EVENT for a transition into H1 (not a meaningful phase)', async () => {
+      setPreviousScore('12345', 0, 0, 0, 0, 1); // baseline: NS
+
       const events: StateChangeEvent[] = [];
       eventBus.on(STATE_CHANGE_EVENT, (e) => events.push(e));
 
-      const raw: TxLINERawScoreEvent = {
-        fixtureId: '12345',
-        seq: 32,
-        ts: 1700004000,
-        gameState: '1H',
-        homeScore: 0,
-        awayScore: 0,
-      };
+      await normalizeScoreEvent(makeEvent({ StatusId: 2 })); // H1
 
-      await normalizeScoreEvent(raw);
+      expect(events).toHaveLength(0);
+    });
+
+    it('does NOT emit STATE_CHANGE_EVENT repeatedly while StatusId stays the same', async () => {
+      setPreviousScore('12345', 0, 0, 0, 0, 4); // baseline already H2
+
+      const events: StateChangeEvent[] = [];
+      eventBus.on(STATE_CHANGE_EVENT, (e) => events.push(e));
+
+      // Real live traffic re-sends many action events per second within the same phase.
+      await normalizeScoreEvent(makeEvent({ Seq: 40, StatusId: 4 }));
+      await normalizeScoreEvent(makeEvent({ Seq: 41, StatusId: 4 }));
+      await normalizeScoreEvent(makeEvent({ Seq: 42, StatusId: 4 }));
 
       expect(events).toHaveLength(0);
     });
@@ -295,15 +299,8 @@ describe('normalizeScoreEvent', () => {
   // ─── Persistence ───────────────────────────────────────────────────────────
 
   describe('match_events persistence (Requirement 4.6, 25.3)', () => {
-    it('stores every raw event in match_events table', async () => {
-      const raw: TxLINERawScoreEvent = {
-        fixtureId: '12345',
-        seq: 40,
-        ts: 1700005000,
-        gameState: '1H',
-        homeScore: 0,
-        awayScore: 0,
-      };
+    it('stores every non-heartbeat raw event in match_events table', async () => {
+      const raw = makeEvent({ Seq: 40, Ts: 1700005000, StatusId: 2 });
 
       await normalizeScoreEvent(raw);
 
@@ -312,7 +309,7 @@ describe('normalizeScoreEvent', () => {
         fixture_id: 12345,
         seq: 40,
         ts: 1700005000,
-        game_state: '1H',
+        game_state: 'H1',
         event_json: raw,
       });
     });
@@ -320,69 +317,41 @@ describe('normalizeScoreEvent', () => {
     it('does not throw when Supabase insert fails', async () => {
       mockInsert.mockResolvedValueOnce({ error: { message: 'DB error' } });
 
-      const raw: TxLINERawScoreEvent = {
-        fixtureId: '12345',
-        seq: 41,
-        ts: 1700005100,
-        gameState: '1H',
-        homeScore: 0,
-        awayScore: 0,
-      };
-
-      // Should not throw
-      await expect(normalizeScoreEvent(raw)).resolves.not.toThrow();
+      await expect(normalizeScoreEvent(makeEvent({ Seq: 41 }))).resolves.not.toThrow();
     });
   });
 
   // ─── Combined events ───────────────────────────────────────────────────────
 
   describe('combined event handling', () => {
-    it('emits both GOAL_EVENT and STATE_CHANGE_EVENT when goal occurs at state change', async () => {
-      setPreviousScore('12345', 1, 1);
+    it('emits both GOAL_EVENT and STATE_CHANGE_EVENT when a goal coincides with a phase transition', async () => {
+      setPreviousScore('12345', 1, 1, 0, 0, 4); // baseline: H2, 1-1
 
       const goalEvents: GoalEvent[] = [];
       const stateEvents: StateChangeEvent[] = [];
       eventBus.on(GOAL_EVENT, (e) => goalEvents.push(e));
       eventBus.on(STATE_CHANGE_EVENT, (e) => stateEvents.push(e));
 
-      const raw: TxLINERawScoreEvent = {
-        fixtureId: '12345',
-        seq: 50,
-        ts: 1700006000,
-        gameState: 'ET',
-        homeScore: 2,
-        awayScore: 1,
-        incidents: [{ type: 'goal', team: 'home', player: 'Messi' }],
-      };
-
-      await normalizeScoreEvent(raw);
+      await normalizeScoreEvent(
+        makeEvent({ Seq: 50, Ts: 1700006000, StatusId: 7, Stats: { '1': 2, '2': 1, '5': 0, '6': 0 } }),
+      );
 
       expect(goalEvents).toHaveLength(1);
       expect(stateEvents).toHaveLength(1);
-      expect(goalEvents[0].player).toBe('Messi');
-      expect(stateEvents[0].newGameState).toBe('ET');
+      expect(stateEvents[0].newGameState).toBe('ET1');
     });
 
-    it('emits goal and red card from same event', async () => {
+    it('emits goal and red card from the same event', async () => {
+      setPreviousScore('12345', 0, 0, 0, 0);
+
       const goalEvents: GoalEvent[] = [];
       const redCardEvents: RedCardEvent[] = [];
       eventBus.on(GOAL_EVENT, (e) => goalEvents.push(e));
       eventBus.on(RED_CARD_EVENT, (e) => redCardEvents.push(e));
 
-      const raw: TxLINERawScoreEvent = {
-        fixtureId: '12345',
-        seq: 51,
-        ts: 1700006100,
-        gameState: '2H',
-        homeScore: 1,
-        awayScore: 0,
-        incidents: [
-          { type: 'goal', team: 'home', player: 'Ronaldo' },
-          { type: 'red_card', team: 'away', player: 'Pepe' },
-        ],
-      };
-
-      await normalizeScoreEvent(raw);
+      await normalizeScoreEvent(
+        makeEvent({ Seq: 51, Ts: 1700006100, Stats: { '1': 1, '2': 0, '5': 0, '6': 1 } }),
+      );
 
       expect(goalEvents).toHaveLength(1);
       expect(redCardEvents).toHaveLength(1);

@@ -1,0 +1,408 @@
+{
+  "address": "8Yc8JQutXw9rkS1VSYdGEkChGYJhkJKuw64v1CmdN5H8",
+  "metadata": {
+    "name": "tribe",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "TRIBE — On-chain fan reputation, tribal identity, and soulbound Standing"
+  },
+  "instructions": [
+    {
+      "name": "create_fan_account",
+      "docs": [
+        "Create a new FanAccount when a fan joins a tribe.",
+        "Standing is initialized to 100, titles to 0."
+      ],
+      "discriminator": [
+        212,
+        15,
+        136,
+        166,
+        74,
+        162,
+        79,
+        138
+      ],
+      "accounts": [
+        {
+          "name": "fan_account",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  102,
+                  97,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "authority"
+              }
+            ]
+          }
+        },
+        {
+          "name": "tribe",
+          "writable": true
+        },
+        {
+          "name": "authority",
+          "docs": [
+            "Does not need to sign — the server creates the account on the fan's behalf",
+            "(silent wallet architecture; the fan's private key is never held server-side)."
+          ]
+        },
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "create_tribe",
+      "docs": [
+        "Initialize a new TribeAccount (admin only for hackathon)."
+      ],
+      "discriminator": [
+        26,
+        137,
+        21,
+        62,
+        21,
+        228,
+        127,
+        43
+      ],
+      "accounts": [
+        {
+          "name": "tribe_account",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  116,
+                  114,
+                  105,
+                  98,
+                  101
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "macro_id"
+              },
+              {
+                "kind": "arg",
+                "path": "region_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "admin",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "macro_id",
+          "type": "u16"
+        },
+        {
+          "name": "region_id",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "name": "settle_read",
+      "docs": [
+        "Settle resolved Reads: create ReadRecord and update FanAccount standing."
+      ],
+      "discriminator": [
+        43,
+        98,
+        139,
+        223,
+        53,
+        64,
+        114,
+        86
+      ],
+      "accounts": [
+        {
+          "name": "read_record",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  114,
+                  101,
+                  97,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "fan_account"
+              },
+              {
+                "kind": "arg",
+                "path": "fixture_id"
+              },
+              {
+                "kind": "arg",
+                "path": "read_seq"
+              }
+            ]
+          }
+        },
+        {
+          "name": "fan_account",
+          "writable": true
+        },
+        {
+          "name": "tribe",
+          "writable": true
+        },
+        {
+          "name": "settler",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "fixture_id",
+          "type": "u64"
+        },
+        {
+          "name": "read_seq",
+          "type": "u64"
+        },
+        {
+          "name": "read_type",
+          "type": "u8"
+        },
+        {
+          "name": "predicted",
+          "type": "u8"
+        },
+        {
+          "name": "resolved",
+          "type": "u8"
+        },
+        {
+          "name": "txline_seq",
+          "type": "u64"
+        },
+        {
+          "name": "correct",
+          "type": "bool"
+        },
+        {
+          "name": "standing_delta",
+          "type": "i64"
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "FanAccount",
+      "discriminator": [
+        121,
+        23,
+        32,
+        50,
+        97,
+        66,
+        56,
+        73
+      ]
+    },
+    {
+      "name": "ReadRecord",
+      "discriminator": [
+        34,
+        94,
+        56,
+        215,
+        217,
+        137,
+        14,
+        8
+      ]
+    },
+    {
+      "name": "TribeAccount",
+      "discriminator": [
+        175,
+        60,
+        174,
+        47,
+        7,
+        35,
+        216,
+        27
+      ]
+    }
+  ],
+  "types": [
+    {
+      "name": "FanAccount",
+      "docs": [
+        "Fan identity — PDA seeds: [\"fan\", authority_pubkey]"
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "tribe",
+            "type": "pubkey"
+          },
+          {
+            "name": "standing",
+            "type": "u64"
+          },
+          {
+            "name": "titles",
+            "type": "u8"
+          },
+          {
+            "name": "joined_slot",
+            "type": "u64"
+          },
+          {
+            "name": "reads_correct",
+            "type": "u32"
+          },
+          {
+            "name": "reads_total",
+            "type": "u32"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ReadRecord",
+      "docs": [
+        "Resolved Read record — PDA seeds: [\"read\", fan_pubkey, fixture_id, read_seq]"
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "fan",
+            "type": "pubkey"
+          },
+          {
+            "name": "fixture_id",
+            "type": "u64"
+          },
+          {
+            "name": "read_type",
+            "type": "u8"
+          },
+          {
+            "name": "predicted",
+            "type": "u8"
+          },
+          {
+            "name": "resolved",
+            "type": "u8"
+          },
+          {
+            "name": "txline_seq",
+            "type": "u64"
+          },
+          {
+            "name": "correct",
+            "type": "bool"
+          },
+          {
+            "name": "standing_delta",
+            "type": "i64"
+          },
+          {
+            "name": "resolved_slot",
+            "type": "u64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "TribeAccount",
+      "docs": [
+        "Sub-tribe — PDA seeds: [\"tribe\", macro_id.to_le_bytes(), region_id.to_le_bytes()]"
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "macro_id",
+            "type": "u16"
+          },
+          {
+            "name": "region_id",
+            "type": "u32"
+          },
+          {
+            "name": "member_count",
+            "type": "u32"
+          },
+          {
+            "name": "aggregate_standing",
+            "type": "u64"
+          },
+          {
+            "name": "flame",
+            "type": "u64"
+          },
+          {
+            "name": "rank",
+            "type": "u32"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    }
+  ]
+}

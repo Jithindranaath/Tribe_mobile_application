@@ -19,6 +19,10 @@ function makeResolution(overrides?: Partial<Resolution>): Resolution {
     correct: true,
     standingDelta: 100,
     txLineSeq: 42,
+    fixtureId: 'fixture-123',
+    readType: 'moment_read',
+    predicted: 1,
+    resolved: 1,
     ...overrides,
   };
 }
@@ -79,6 +83,10 @@ describe('SettlementQueue', () => {
         correct: true,
         standingDelta: 240,
         txLineSeq: 77,
+        fixtureId: 'fixture-123',
+        readType: 'moment_read',
+        predicted: 1,
+        resolved: 1,
       };
 
       queue.queue(resolution);

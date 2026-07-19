@@ -69,6 +69,44 @@ export function classifyMoment(
   };
 }
 
+/**
+ * Approximates this read's timing-bonus percentile within its read_type.
+ *
+ * `reads_live` has no `resolved_at` timestamp, so timing_bonus can't be
+ * recomputed directly for historical reads. But for *correct* resolved reads,
+ * `standing_delta = 100 × difficulty_multiplier × timing_bonus` (see
+ * `resolver.ts`'s `computeStandingDelta`), so
+ * `timing_bonus = standing_delta / (100 × difficulty_multiplier)` is
+ * recoverable from stored data. Not exact (rounding in the stored delta), but
+ * a reasonable derivation rather than a guess.
+ */
+export async function computeTimingBonusPercentile(
+  readType: string,
+  currentTimingBonus: number,
+  excludeReadId: string,
+): Promise<number> {
+  const supabase = getSupabaseClient();
+
+  const { data, error } = await supabase
+    .from('reads_live')
+    .select('read_id, standing_delta, odds_at_commit')
+    .eq('read_type', readType)
+    .eq('status', 'resolved')
+    .gt('standing_delta', 0); // correct reads only (positive delta)
+
+  if (error || !data) return 0;
+
+  const historicalTimingBonuses = (data as Array<{ read_id: string; standing_delta: number; odds_at_commit: number | null }>)
+    .filter((r) => r.read_id !== excludeReadId && r.odds_at_commit)
+    .map((r) => r.standing_delta / (100 * (r.odds_at_commit as number)))
+    .filter((tb) => tb > 0);
+
+  if (historicalTimingBonuses.length === 0) return 1; // no comparison data — treat as top
+
+  const atOrBelow = historicalTimingBonuses.filter((tb) => tb <= currentTimingBonus).length;
+  return atOrBelow / historicalTimingBonuses.length;
+}
+
 // ─── Database Functions ──────────────────────────────────────────────────────
 
 /**

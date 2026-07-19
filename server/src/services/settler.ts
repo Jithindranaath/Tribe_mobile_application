@@ -1,19 +1,19 @@
 /**
- * Settlement Executor — attempts to settle resolved Read batches on-chain.
+ * Settlement Executor — settles resolved Read batches on-chain.
  *
- * For the hackathon, the actual Solana transaction is simulated (since we can't
- * run Anchor without the CLI in this context). The retry logic and error handling
- * are real and production-ready.
- *
- * Retry policy:
- * - On tx failure: retry up to 3 times with increasing priority fee multipliers
- *   [1.2×, 1.5×, 2.0×]
+ * Each resolution in a batch is settled with a real `settle_read` call
+ * (via services/onchain.ts). Retry logic and error handling:
+ * - On tx failure: retry the whole batch up to 3 times with increasing
+ *   priority fee multipliers [1.2×, 1.5×, 2.0×]
  * - On final failure: log error + alert operators; never surface error to fan
  *
  * Requirements: 27.4, 27.5
  */
 
 import type { Resolution } from './resolver.js';
+import { getFanById } from './fans.js';
+import { deriveMacroId, deriveRegionId, deriveTribePda, settleReadOnChain } from './onchain.js';
+import { bumpCachedFanStanding, bumpCachedTribeAggregateStanding } from './standing-cache.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -29,20 +29,18 @@ export type OnSettledCallback = (batch: Resolution[], txSignature: string) => vo
 export type OnFailedCallback = (batch: Resolution[], error: string) => void;
 
 /**
- * Options for simulating on-chain transaction behavior during development.
- * In production, these would be replaced by real Solana transaction mechanics.
+ * Settles an entire batch on-chain, returning the last transaction signature.
+ * Throws on any failure (any resolution in the batch failing to settle fails
+ * the whole attempt, which SettlementExecutor will retry).
  */
-export interface SimulationOptions {
-  /** Simulated delay per transaction attempt in ms (default: 200) */
-  delayMs?: number;
-  /** Probability of success per attempt, 0.0–1.0 (default: 0.9) */
-  successRate?: number;
-  /**
-   * Optional deterministic sequence of outcomes for testing.
-   * Each entry is true (success) or false (failure).
-   * When provided, successRate is ignored and outcomes are consumed in order.
-   */
-  outcomeSequence?: boolean[];
+export type AttemptSettlementFn = (
+  batch: Resolution[],
+  priorityFeeMicroLamports: number,
+) => Promise<string>;
+
+export interface SettlementExecutorOptions {
+  /** Injectable settlement function. Defaults to real on-chain settle_read calls. */
+  attemptSettlement?: AttemptSettlementFn;
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -53,8 +51,56 @@ export const PRIORITY_FEE_MULTIPLIERS = [1.2, 1.5, 2.0] as const;
 /** Maximum number of retry attempts */
 export const MAX_RETRIES = 3;
 
-/** Base priority fee in micro-lamports (for real implementation) */
+/** Base priority fee in micro-lamports */
 export const BASE_PRIORITY_FEE = 10_000;
+
+// ─── Default (real) settlement implementation ─────────────────────────────────
+
+/**
+ * Settles every resolution in the batch on-chain, sequentially. Looks up each
+ * fan's wallet + tribe from the `fans` table (populated by
+ * POST /api/auth/register) to derive the on-chain accounts.
+ */
+async function defaultAttemptSettlement(
+  batch: Resolution[],
+  priorityFeeMicroLamports: number,
+): Promise<string> {
+  let lastSignature = '';
+
+  for (const resolution of batch) {
+    const fan = await getFanById(resolution.fanId);
+    if (!fan) {
+      throw new Error(`[SettlementExecutor] No fan record found for fan_id ${resolution.fanId}`);
+    }
+
+    const macroId = deriveMacroId(fan.macro_tribe);
+    const regionId = deriveRegionId(fan.tribe_id);
+    const tribePda = deriveTribePda(macroId, regionId);
+
+    const { txSignature } = await settleReadOnChain({
+      walletAddress: fan.wallet_pubkey,
+      tribePda,
+      fixtureId: resolution.fixtureId,
+      readId: resolution.readId,
+      readType: resolution.readType,
+      predicted: resolution.predicted,
+      resolved: resolution.resolved,
+      txLineSeq: resolution.txLineSeq,
+      correct: resolution.correct,
+      standingDelta: resolution.standingDelta,
+      priorityFeeMicroLamports,
+    });
+
+    lastSignature = txSignature;
+
+    // Mirror the on-chain change into the cache in the same step — see
+    // standing-cache.ts for why this is event-driven rather than polled.
+    await bumpCachedFanStanding(resolution.fanId, resolution.standingDelta);
+    await bumpCachedTribeAggregateStanding(fan.tribe_id, resolution.standingDelta);
+  }
+
+  return lastSignature;
+}
 
 // ─── SettlementExecutor Class ────────────────────────────────────────────────
 
@@ -62,34 +108,23 @@ export class SettlementExecutor {
   private onSettled: OnSettledCallback | null = null;
   private onFailed: OnFailedCallback | null = null;
   private failedBatches: Array<{ batch: Resolution[]; error: string; timestamp: number }> = [];
-  private simulationOptions: SimulationOptions;
-  private outcomeIndex = 0;
+  private attemptSettlement: AttemptSettlementFn;
 
-  constructor(options?: SimulationOptions) {
-    this.simulationOptions = {
-      delayMs: options?.delayMs ?? 200,
-      successRate: options?.successRate ?? 0.9,
-      outcomeSequence: options?.outcomeSequence,
-    };
+  constructor(options?: SettlementExecutorOptions) {
+    this.attemptSettlement = options?.attemptSettlement ?? defaultAttemptSettlement;
   }
 
-  /**
-   * Set callback for successful settlements.
-   */
+  /** Set callback for successful settlements. */
   setOnSettled(callback: OnSettledCallback): void {
     this.onSettled = callback;
   }
 
-  /**
-   * Set callback for exhausted retries (all attempts failed).
-   */
+  /** Set callback for exhausted retries (all attempts failed). */
   setOnFailed(callback: OnFailedCallback): void {
     this.onFailed = callback;
   }
 
-  /**
-   * Get all failed batches that have been recorded in memory.
-   */
+  /** Get all failed batches that have been recorded in memory. */
   getFailedBatches(): ReadonlyArray<{ batch: Resolution[]; error: string; timestamp: number }> {
     return this.failedBatches;
   }
@@ -97,39 +132,38 @@ export class SettlementExecutor {
   /**
    * Execute settlement for a batch of resolutions.
    *
-   * Attempts to submit the on-chain transaction. On failure, retries up to 3
+   * Attempts the real on-chain transaction(s). On failure, retries up to 3
    * times with increasing priority fees. On final failure, logs the error and
    * alerts operators but never throws (settlement failures are silent to fans).
-   *
-   * @param batch - Array of Resolution objects to settle on-chain
    */
   async executeBatch(batch: Resolution[]): Promise<SettlementResult> {
     if (batch.length === 0) {
       return { success: true, attempt: 0, priorityFeeMultiplier: 1.0 };
     }
 
-    // First attempt with base priority fee
-    const firstResult = await this.attemptTransaction(batch, 1.0);
-    if (firstResult.success) {
-      this.handleSuccess(batch, firstResult);
-      return firstResult;
-    }
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      const priorityFeeMultiplier = attempt === 0 ? 1.0 : PRIORITY_FEE_MULTIPLIERS[attempt - 1];
+      const priorityFeeMicroLamports = Math.round(BASE_PRIORITY_FEE * priorityFeeMultiplier);
 
-    // Retry with increasing priority fee multipliers
-    for (let retry = 0; retry < MAX_RETRIES; retry++) {
-      const multiplier = PRIORITY_FEE_MULTIPLIERS[retry];
-      const result = await this.attemptTransaction(batch, multiplier);
-
-      if (result.success) {
+      try {
+        const txSignature = await this.attemptSettlement(batch, priorityFeeMicroLamports);
+        const result: SettlementResult = {
+          success: true,
+          txSignature,
+          attempt: attempt + 1,
+          priorityFeeMultiplier,
+        };
         this.handleSuccess(batch, result);
         return result;
+      } catch (err) {
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        if (attempt < MAX_RETRIES) {
+          console.warn(
+            `[SettlementExecutor] Retry ${attempt + 1}/${MAX_RETRIES} failed ` +
+              `(priority fee ${priorityFeeMultiplier}×): ${errorMessage}`,
+          );
+        }
       }
-
-      // Log retry attempt
-      console.warn(
-        `[SettlementExecutor] Retry ${retry + 1}/${MAX_RETRIES} failed ` +
-          `(priority fee ${multiplier}×): ${result.error}`
-      );
     }
 
     // All retries exhausted — operator alert, never surface to fans
@@ -146,59 +180,6 @@ export class SettlementExecutor {
   }
 
   // ─── Private ─────────────────────────────────────────────────────────────
-
-  /**
-   * Attempt a single on-chain transaction.
-   *
-   * For hackathon: simulates the transaction with configurable delay and
-   * success rate.
-   *
-   * Real implementation would:
-   * 1. Construct `settle_reads` instruction per resolution
-   * 2. Build transaction with ComputeBudget priority fee
-   * 3. Send and confirm transaction
-   */
-  private async attemptTransaction(
-    batch: Resolution[],
-    priorityFeeMultiplier: number
-  ): Promise<SettlementResult> {
-    const attempt = priorityFeeMultiplier === 1.0
-      ? 1
-      : PRIORITY_FEE_MULTIPLIERS.indexOf(priorityFeeMultiplier as typeof PRIORITY_FEE_MULTIPLIERS[number]) + 2;
-
-    try {
-      // Simulate network delay
-      await this.simulateDelay();
-
-      // Simulate transaction success/failure
-      const success = this.simulateOutcome();
-
-      if (success) {
-        // Generate a fake tx signature for simulation
-        const txSignature = `sim_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-        return {
-          success: true,
-          txSignature,
-          attempt,
-          priorityFeeMultiplier,
-        };
-      } else {
-        return {
-          success: false,
-          attempt,
-          priorityFeeMultiplier,
-          error: 'Simulated transaction failure (blockhash expired or insufficient funds)',
-        };
-      }
-    } catch (err) {
-      return {
-        success: false,
-        attempt,
-        priorityFeeMultiplier,
-        error: err instanceof Error ? err.message : String(err),
-      };
-    }
-  }
 
   private handleSuccess(batch: Resolution[], result: SettlementResult): void {
     console.log(
@@ -232,18 +213,5 @@ export class SettlementExecutor {
     }
 
     // Never throw — settlement failures are silent to fans (requirement 27.5)
-  }
-
-  private simulateDelay(): Promise<void> {
-    const delayMs = this.simulationOptions.delayMs ?? 200;
-    return new Promise((resolve) => setTimeout(resolve, delayMs));
-  }
-
-  private simulateOutcome(): boolean {
-    const { outcomeSequence, successRate } = this.simulationOptions;
-    if (outcomeSequence && this.outcomeIndex < outcomeSequence.length) {
-      return outcomeSequence[this.outcomeIndex++];
-    }
-    return Math.random() < (successRate ?? 0.9);
   }
 }

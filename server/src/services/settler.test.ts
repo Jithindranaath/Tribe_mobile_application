@@ -5,6 +5,12 @@
  * - Task 16.8: Retry up to 3 times with increasing priority fees [1.2×, 1.5×, 2.0×]
  * - Task 16.8: On final failure: log error + alert operators; never surface error to fan
  * - Requirements: 27.4, 27.5
+ *
+ * `attemptSettlement` is injected (same dependency-injection pattern used by
+ * ReplayManager elsewhere in this codebase) so these tests control success/
+ * failure deterministically without touching the real chain. The default
+ * (uninjected) implementation is real and calls services/onchain.ts —
+ * verified separately via the live on-chain smoke test, not here.
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
@@ -13,6 +19,7 @@ import {
   PRIORITY_FEE_MULTIPLIERS,
   MAX_RETRIES,
   BASE_PRIORITY_FEE,
+  type AttemptSettlementFn,
 } from './settler.js';
 import type { Resolution } from './resolver.js';
 
@@ -25,12 +32,40 @@ function createResolution(overrides?: Partial<Resolution>): Resolution {
     correct: true,
     standingDelta: 150,
     txLineSeq: 42,
+    fixtureId: 'fixture-123',
+    readType: 'moment_read',
+    predicted: 1,
+    resolved: 1,
     ...overrides,
   };
 }
 
 function createBatch(size: number): Resolution[] {
   return Array.from({ length: size }, () => createResolution());
+}
+
+/** Always succeeds with a fixed tx signature. */
+function alwaysSucceeds(txSignature = 'tx-sig-123'): AttemptSettlementFn {
+  return async () => txSignature;
+}
+
+/** Always throws. */
+function alwaysFails(message = 'simulated failure'): AttemptSettlementFn {
+  return async () => {
+    throw new Error(message);
+  };
+}
+
+/** Fails N times then succeeds. */
+function failsThenSucceeds(failCount: number, txSignature = 'tx-sig-final'): AttemptSettlementFn {
+  let calls = 0;
+  return async () => {
+    calls++;
+    if (calls <= failCount) {
+      throw new Error(`simulated failure ${calls}`);
+    }
+    return txSignature;
+  };
 }
 
 // ─── Constants Tests ─────────────────────────────────────────────────────────
@@ -62,8 +97,7 @@ describe('SettlementExecutor', () => {
 
   describe('successful settlement on first attempt', () => {
     beforeEach(() => {
-      // Always succeed
-      executor = new SettlementExecutor({ delayMs: 0, successRate: 1.0 });
+      executor = new SettlementExecutor({ attemptSettlement: alwaysSucceeds() });
     });
 
     it('should settle a batch successfully', async () => {
@@ -114,8 +148,7 @@ describe('SettlementExecutor', () => {
 
   describe('retry logic (Requirement 27.4)', () => {
     it('should retry up to 3 times before giving up', async () => {
-      // Always fail
-      executor = new SettlementExecutor({ delayMs: 0, successRate: 0.0 });
+      executor = new SettlementExecutor({ attemptSettlement: alwaysFails() });
 
       const batch = createBatch(2);
       const result = await executor.executeBatch(batch);
@@ -127,10 +160,7 @@ describe('SettlementExecutor', () => {
 
     it('should use increasing priority fee multipliers on retries', async () => {
       // Fail first 3 attempts (initial + 1.2× + 1.5×), succeed on 4th (2.0×)
-      executor = new SettlementExecutor({
-        delayMs: 0,
-        outcomeSequence: [false, false, false, true],
-      });
+      executor = new SettlementExecutor({ attemptSettlement: failsThenSucceeds(3) });
 
       const batch = createBatch(2);
       const result = await executor.executeBatch(batch);
@@ -140,11 +170,7 @@ describe('SettlementExecutor', () => {
     });
 
     it('should succeed on first retry (1.2× multiplier)', async () => {
-      // Fail initial attempt, succeed on first retry (1.2×)
-      executor = new SettlementExecutor({
-        delayMs: 0,
-        outcomeSequence: [false, true],
-      });
+      executor = new SettlementExecutor({ attemptSettlement: failsThenSucceeds(1) });
 
       const batch = createBatch(2);
       const result = await executor.executeBatch(batch);
@@ -154,11 +180,7 @@ describe('SettlementExecutor', () => {
     });
 
     it('should succeed on second retry (1.5× multiplier)', async () => {
-      // Fail initial + first retry, succeed on second retry (1.5×)
-      executor = new SettlementExecutor({
-        delayMs: 0,
-        outcomeSequence: [false, false, true],
-      });
+      executor = new SettlementExecutor({ attemptSettlement: failsThenSucceeds(2) });
 
       const batch = createBatch(2);
       const result = await executor.executeBatch(batch);
@@ -166,18 +188,35 @@ describe('SettlementExecutor', () => {
       expect(result.success).toBe(true);
       expect(result.priorityFeeMultiplier).toBe(1.5);
     });
+
+    it('should pass an increasing priority fee to each attempt', async () => {
+      const seenFees: number[] = [];
+      executor = new SettlementExecutor({
+        attemptSettlement: async (_batch, priorityFeeMicroLamports) => {
+          seenFees.push(priorityFeeMicroLamports);
+          if (seenFees.length <= 2) throw new Error('fail');
+          return 'tx-sig';
+        },
+      });
+
+      await executor.executeBatch(createBatch(1));
+
+      expect(seenFees).toEqual([
+        BASE_PRIORITY_FEE * 1.0,
+        Math.round(BASE_PRIORITY_FEE * 1.2),
+        Math.round(BASE_PRIORITY_FEE * 1.5),
+      ]);
+    });
   });
 
   describe('final failure handling (Requirement 27.5)', () => {
     beforeEach(() => {
-      // Always fail
-      executor = new SettlementExecutor({ delayMs: 0, successRate: 0.0 });
+      executor = new SettlementExecutor({ attemptSettlement: alwaysFails() });
     });
 
     it('should never throw on final failure (silent to fans)', async () => {
       const batch = createBatch(5);
 
-      // executeBatch must never throw, even on total failure
       await expect(executor.executeBatch(batch)).resolves.not.toThrow();
     });
 
@@ -247,46 +286,18 @@ describe('SettlementExecutor', () => {
     });
   });
 
-  describe('simulation options', () => {
-    it('should respect custom delay', async () => {
-      executor = new SettlementExecutor({ delayMs: 50, successRate: 1.0 });
-
-      const start = Date.now();
-      await executor.executeBatch(createBatch(1));
-      const elapsed = Date.now() - start;
-
-      // Should take at least 50ms (one attempt)
-      expect(elapsed).toBeGreaterThanOrEqual(40); // small tolerance
-    });
-
-    it('should default to 90% success rate', async () => {
-      // Use default options — just ensure it doesn't crash
-      executor = new SettlementExecutor({ delayMs: 0 });
-
-      const batch = createBatch(1);
-      const result = await executor.executeBatch(batch);
-
-      // With 90% success rate, most of the time this will succeed
-      // But we can't assert deterministically, so just check it doesn't throw
-      expect(result).toBeDefined();
-      expect(typeof result.success).toBe('boolean');
-    });
-  });
-
   describe('callback management', () => {
     beforeEach(() => {
-      executor = new SettlementExecutor({ delayMs: 0, successRate: 1.0 });
+      executor = new SettlementExecutor({ attemptSettlement: alwaysSucceeds() });
     });
 
     it('should handle no onSettled callback gracefully', async () => {
-      // Don't set any callback
       const batch = createBatch(2);
       await expect(executor.executeBatch(batch)).resolves.not.toThrow();
     });
 
     it('should handle no onFailed callback gracefully', async () => {
-      executor = new SettlementExecutor({ delayMs: 0, successRate: 0.0 });
-      // Don't set any callback
+      executor = new SettlementExecutor({ attemptSettlement: alwaysFails() });
       const batch = createBatch(2);
       await expect(executor.executeBatch(batch)).resolves.not.toThrow();
     });

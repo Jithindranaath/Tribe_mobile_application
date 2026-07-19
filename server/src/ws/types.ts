@@ -9,7 +9,9 @@ export type WSEventType =
   | 'read_prompt'
   | 'surge'
   | 'keeper_inject'
-  | 'standing_update';
+  | 'standing_update'
+  | 'share_card_ready'
+  | 'rank_update';
 
 /**
  * Base envelope for all WebSocket messages.
@@ -64,6 +66,18 @@ export interface StandingUpdatePayload {
   delta: number;
 }
 
+export interface ShareCardReadyPayload {
+  fanId: string;
+  cardId: string;
+  imageUrl: string;
+}
+
+export interface RankUpdatePayload {
+  tribeId: string;
+  rank: number;
+  previousRank?: number;
+}
+
 // ─── Typed Message Aliases ───────────────────────────────────────────────────
 
 export type PresenceMessage = WSMessage<'presence', PresencePayload>;
@@ -72,6 +86,8 @@ export type ReadPromptMessage = WSMessage<'read_prompt', ReadPromptPayload>;
 export type SurgeMessage = WSMessage<'surge', SurgePayload>;
 export type KeeperInjectMessage = WSMessage<'keeper_inject', KeeperInjectPayload>;
 export type StandingUpdateMessage = WSMessage<'standing_update', StandingUpdatePayload>;
+export type ShareCardReadyMessage = WSMessage<'share_card_ready', ShareCardReadyPayload>;
+export type RankUpdateMessage = WSMessage<'rank_update', RankUpdatePayload>;
 
 /**
  * Union of all outbound message types.
@@ -82,7 +98,9 @@ export type OutboundWSMessage =
   | ReadPromptMessage
   | SurgeMessage
   | KeeperInjectMessage
-  | StandingUpdateMessage;
+  | StandingUpdateMessage
+  | ShareCardReadyMessage
+  | RankUpdateMessage;
 
 // ─── Client → Server Messages ────────────────────────────────────────────────
 
