@@ -10,12 +10,16 @@ interface AuthState {
   isOnboarded: boolean;
   /** Currently selected tribe ID */
   selectedTribeId: string | null;
+  /** Display name for the selected tribe, e.g. "Brazil · Hyderabad" */
+  selectedTribeName: string | null;
+  /** Display name for the selected macro tribe (team/country), e.g. "Brazil" */
+  selectedMacroTribe: string | null;
   /** Login via social provider (stub — real impl delegates to Privy SDK) */
   login: (provider: "google" | "apple" | "email") => Promise<void>;
   /** Clear auth state */
   logout: () => void;
   /** Set the selected tribe */
-  setTribe: (tribeId: string) => void;
+  setTribe: (tribeId: string, tribeName: string, macroTribe: string) => void;
 }
 
 export const useAuthStore = create<AuthState>((set) => ({
@@ -23,6 +27,8 @@ export const useAuthStore = create<AuthState>((set) => ({
   token: null,
   isOnboarded: false,
   selectedTribeId: null,
+  selectedTribeName: null,
+  selectedMacroTribe: null,
 
   login: async (_provider) => {
     // Actual implementation will integrate with Privy RN SDK
@@ -37,7 +43,10 @@ export const useAuthStore = create<AuthState>((set) => ({
       token: null,
       isOnboarded: false,
       selectedTribeId: null,
+      selectedTribeName: null,
+      selectedMacroTribe: null,
     }),
 
-  setTribe: (tribeId) => set({ selectedTribeId: tribeId }),
+  setTribe: (tribeId, tribeName, macroTribe) =>
+    set({ selectedTribeId: tribeId, selectedTribeName: tribeName, selectedMacroTribe: macroTribe }),
 }));

@@ -56,7 +56,8 @@ export default function OnboardingScreen() {
     } else if (step === STEP_REGION && selectedRegion) {
       // Construct tribeId from team + region and persist
       const tribeId = `${selectedTeam!.id}-${selectedRegion.id}`;
-      setTribe(tribeId);
+      const tribeName = `${selectedTeam!.name} · ${selectedRegion.city}`;
+      setTribe(tribeId, tribeName, selectedTeam!.name);
       setStep(STEP_LOGIN);
     }
   }, [step, selectedTeam, selectedRegion, setTribe]);

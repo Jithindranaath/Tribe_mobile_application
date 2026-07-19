@@ -45,6 +45,12 @@ export interface TimelineResponse {
 export interface RegisterPayload {
   privyUserId: string;
   tribeId: string;
+  /** Display name, e.g. "Brazil · Hyderabad" — server has no other source for this. */
+  tribeName: string;
+  /** Display name for the macro tribe (team/country), e.g. "Brazil". */
+  macroTribe: string;
+  /** The fan's silent embedded Solana wallet address (from Privy). */
+  walletAddress: string;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

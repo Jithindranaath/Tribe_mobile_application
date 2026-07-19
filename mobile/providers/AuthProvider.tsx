@@ -17,6 +17,7 @@ import {
   usePrivy,
   useLoginWithOAuth,
   useLoginWithEmail,
+  useEmbeddedSolanaWallet,
 } from "@privy-io/expo";
 import { useAuthStore } from "../stores/useAuthStore";
 import { registerFan } from "../lib/api";
@@ -41,12 +42,16 @@ const TOKEN_REFRESH_INTERVAL = 5 * 60 * 1000; // 5 minutes
  */
 function AuthStateSync({ children }: { children: React.ReactNode }) {
   const { user, isReady, getAccessToken, logout: privyLogout } = usePrivy();
+  const solanaWallet = useEmbeddedSolanaWallet();
   const refreshTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const prevUserIdRef = useRef<string | null>(null);
 
   const setStoreState = useAuthStore.setState;
   const selectedTribeId = useAuthStore((s) => s.selectedTribeId);
+  const selectedTribeName = useAuthStore((s) => s.selectedTribeName);
+  const selectedMacroTribe = useAuthStore((s) => s.selectedMacroTribe);
   const storedFan = useAuthStore((s) => s.fan);
+  const walletAddress = solanaWallet.wallets?.[0]?.address;
 
   // ─── Sync Privy user state to auth store ─────────────────────────────────
 
@@ -68,11 +73,14 @@ function AuthStateSync({ children }: { children: React.ReactNode }) {
           if (token) {
             setStoreState({ token });
 
-            // If fan profile isn't loaded yet and we have a tribe, register
-            if (!storedFan && selectedTribeId) {
+            // If fan profile isn't loaded yet and we have a tribe + embedded wallet, register
+            if (!storedFan && selectedTribeId && selectedTribeName && selectedMacroTribe && walletAddress) {
               const result = await registerFan({
                 privyUserId,
                 tribeId: selectedTribeId,
+                tribeName: selectedTribeName,
+                macroTribe: selectedMacroTribe,
+                walletAddress,
               });
 
               if (result.ok) {
@@ -102,7 +110,17 @@ function AuthStateSync({ children }: { children: React.ReactNode }) {
     };
 
     syncAuthState();
-  }, [user, isReady, getAccessToken, selectedTribeId, storedFan, setStoreState]);
+  }, [
+    user,
+    isReady,
+    getAccessToken,
+    selectedTribeId,
+    selectedTribeName,
+    selectedMacroTribe,
+    storedFan,
+    walletAddress,
+    setStoreState,
+  ]);
 
   // ─── Silent token refresh ────────────────────────────────────────────────
 
@@ -259,8 +277,13 @@ export function useAuth() {
     state: emailState,
   } = useLoginWithEmail();
 
-  const selectedTribeId = useAuthStore((s) => s.selectedTribeId);
   const setStoreState = useAuthStore.setState;
+
+  // Fan registration itself is handled reactively by AuthStateSync (which wraps
+  // the whole app) once both `user` and the embedded Solana wallet are ready —
+  // the wallet is created asynchronously by Privy right after login, so it isn't
+  // reliably available yet at the moment login()/submitEmailCode() resolve here.
+  // These callbacks just complete the auth handshake and stash the token.
 
   const login = useCallback(
     async (provider: "google" | "discord" | "email", email?: string) => {
@@ -276,24 +299,10 @@ export function useAuth() {
         const token = await getAccessToken();
         if (token) {
           setStoreState({ token });
-
-          if (selectedTribeId) {
-            const result = await registerFan({
-              privyUserId: privyUser.id,
-              tribeId: selectedTribeId,
-            });
-
-            if (result.ok) {
-              setStoreState({
-                fan: result.data,
-                isOnboarded: true,
-              });
-            }
-          }
         }
       }
     },
-    [oAuthLogin, sendCode, getAccessToken, selectedTribeId, setStoreState],
+    [oAuthLogin, sendCode, getAccessToken, setStoreState],
   );
 
   const submitEmailCode = useCallback(
@@ -304,24 +313,10 @@ export function useAuth() {
         const token = await getAccessToken();
         if (token) {
           setStoreState({ token });
-
-          if (selectedTribeId) {
-            const result = await registerFan({
-              privyUserId: privyUser.id,
-              tribeId: selectedTribeId,
-            });
-
-            if (result.ok) {
-              setStoreState({
-                fan: result.data,
-                isOnboarded: true,
-              });
-            }
-          }
         }
       }
     },
-    [loginWithCode, getAccessToken, selectedTribeId, setStoreState],
+    [loginWithCode, getAccessToken, setStoreState],
   );
 
   return {
