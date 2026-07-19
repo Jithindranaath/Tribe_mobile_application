@@ -45,6 +45,34 @@ const MATCH_START_STATUS_IDS = new Set([2, 7]); // H1, ET1 — the two ways a ma
 const MATCH_END_STATUS_IDS = new Set([5, 10, 13, 100]); // F, FET, FPE, game_finalised
 
 /**
+ * TxLINE's competitionId for the FIFA World Cup, per the vendored free-tier
+ * example script (`tx-on-chain/examples/devnet/scripts/subscription_free_tier.ts`).
+ * Not documented anywhere as a named constant — inferred from that script being
+ * explicitly titled "Demo subscription and data access for free tier (World Cup)".
+ */
+const WORLD_CUP_COMPETITION_ID = 72;
+
+/**
+ * A football match's real-world duration (kickoff to final whistle) tops out
+ * around 120 minutes (90 + extra time) plus stoppage/penalties/broadcast lag.
+ * `/fixtures/snapshot` only documents GameState 1 (scheduled) and 6 (cancelled)
+ * — there's no documented "live"/"finished" value — so live/finished is
+ * inferred from StartTime vs now instead, using this as the upper bound for
+ * "still plausibly live".
+ */
+const ASSUMED_MAX_MATCH_DURATION_MS = 3 * 60 * 60 * 1000; // 3 hours
+
+/**
+ * `/fixtures/snapshot` doesn't document its `startEpochDay` windowing, but
+ * on-chain fixture roots are bucketed into 10-day windows keyed the same way
+ * (see `fixture_validation_view_only.ts`'s `windowStartDay = floor(epochDay/10)*10`
+ * for PDA derivation) — the off-chain snapshot almost certainly follows the
+ * same bucketing. Querying the current and previous window covers the full
+ * MAX_FIXTURE_AGE_MS (14-day) replay-candidate lookback with two calls.
+ */
+const SNAPSHOT_WINDOW_DAYS = 10;
+
+/**
  * Trims a raw historical event log to the actual match window (kickoff to
  * final whistle). The raw historical feed includes hours of pre-match
  * coverage setup and post-match idle/disconnect events — a real fixture's
@@ -88,6 +116,25 @@ export interface TxLINEFixture {
   kickoff: string; // ISO 8601 timestamp
   state: string;   // 'scheduled' | 'live' | 'finished'
   coverage: boolean;
+}
+
+/**
+ * Raw shape returned by `GET /fixtures/snapshot`, per the vendored
+ * `fetching-snapshots.mdx` example and `fixture_validation_view_only.ts`'s
+ * `validation.snapshot` fields. Only `GameState` values `1` (scheduled) and
+ * `6` (cancelled) are documented — no live/finished value is documented, so
+ * `mapRawFixtureSnapshot` infers those from `StartTime` instead.
+ */
+interface TxLINERawFixtureSnapshot {
+  FixtureId: number;
+  CompetitionId?: number;
+  Competition?: string;
+  Participant1: string;
+  Participant2: string;
+  Participant1IsHome: boolean;
+  StartTime: number; // ms epoch
+  GameState?: number;
+  gameState?: number;
 }
 
 /**
@@ -408,13 +455,39 @@ export class ReplayManager {
   }
 
   /**
-   * Default implementation: fetches fixtures from TxLINE API.
+   * Default implementation: fetches fixtures from the real TxLINE API.
+   *
+   * `GET /fixtures` (the endpoint this previously called) doesn't exist on
+   * the real TxLINE API — confirmed via the vendored devnet example scripts,
+   * which use `GET /fixtures/snapshot?competitionId=X&startEpochDay=Y`
+   * instead. Queries the current and previous 10-day snapshot window (see
+   * SNAPSHOT_WINDOW_DAYS) to cover the full replay-candidate lookback.
    */
   private async defaultFetchFixtures(): Promise<TxLINEFixture[]> {
+    const todayEpochDay = Math.floor(Date.now() / (24 * 60 * 60 * 1000));
+    const currentWindowStart = Math.floor(todayEpochDay / SNAPSHOT_WINDOW_DAYS) * SNAPSHOT_WINDOW_DAYS;
+    const previousWindowStart = currentWindowStart - SNAPSHOT_WINDOW_DAYS;
+
+    const [current, previous] = await Promise.all([
+      this.fetchFixturesSnapshot(currentWindowStart),
+      this.fetchFixturesSnapshot(previousWindowStart),
+    ]);
+
+    const byFixtureId = new Map<string, TxLINEFixture>();
+    for (const fixture of [...previous, ...current]) {
+      byFixtureId.set(fixture.fixtureId, fixture);
+    }
+    return [...byFixtureId.values()];
+  }
+
+  /** Fetches and maps one `/fixtures/snapshot` window. */
+  private async fetchFixturesSnapshot(startEpochDay: number): Promise<TxLINEFixture[]> {
     const { txlineApiBaseUrl } = getEnvConfig();
     // txlineApiBaseUrl already includes /api (e.g. https://txline-dev.txodds.com/api) —
     // do not add another /api segment here.
-    const url = `${txlineApiBaseUrl}/fixtures`;
+    const url =
+      `${txlineApiBaseUrl}/fixtures/snapshot?competitionId=${WORLD_CUP_COMPETITION_ID}` +
+      `&startEpochDay=${startEpochDay}`;
 
     const headers = this.activation.getAuthHeaders();
 
@@ -428,12 +501,13 @@ export class ReplayManager {
 
     if (!response.ok) {
       throw new Error(
-        `[ReplayManager] Failed to fetch fixtures: ${response.status} ${response.statusText}`
+        `[ReplayManager] Failed to fetch fixtures snapshot (startEpochDay=${startEpochDay}): ` +
+          `${response.status} ${response.statusText}`
       );
     }
 
-    const data = await response.json() as TxLINEFixture[];
-    return data;
+    const data = await response.json() as TxLINERawFixtureSnapshot[];
+    return data.map(mapRawFixtureSnapshot);
   }
 
   /**
@@ -469,6 +543,44 @@ export class ReplayManager {
     const bodyText = await response.text();
     return parseHistoricalScoreEvents(bodyText);
   }
+}
+
+// ─── Fixture Snapshot Mapping ────────────────────────────────────────────────
+
+/**
+ * Maps a raw `/fixtures/snapshot` entry to the internal `TxLINEFixture` shape
+ * used by fixture selection/priority scoring. `state` is inferred from
+ * `StartTime` vs now (see ASSUMED_MAX_MATCH_DURATION_MS) since the API
+ * doesn't document a live/finished GameState value. `coverage` is always
+ * true: the free-tier subscription only returns fixtures for leagues it's
+ * actually entitled to, so anything present in the response is covered.
+ */
+function mapRawFixtureSnapshot(raw: TxLINERawFixtureSnapshot): TxLINEFixture {
+  const gameState = raw.GameState ?? raw.gameState;
+  const now = Date.now();
+  const matchEnd = raw.StartTime + ASSUMED_MAX_MATCH_DURATION_MS;
+
+  let state: string;
+  if (gameState === 6) {
+    state = 'cancelled';
+  } else if (now < raw.StartTime) {
+    state = 'scheduled';
+  } else if (now <= matchEnd) {
+    state = 'live';
+  } else {
+    state = 'finished';
+  }
+
+  return {
+    fixtureId: String(raw.FixtureId),
+    sport: 'Soccer',
+    league: raw.Competition ?? 'World Cup',
+    homeTeam: raw.Participant1IsHome ? raw.Participant1 : raw.Participant2,
+    awayTeam: raw.Participant1IsHome ? raw.Participant2 : raw.Participant1,
+    kickoff: new Date(raw.StartTime).toISOString(),
+    state,
+    coverage: true,
+  };
 }
 
 // ─── SSE Body Parsing (historical endpoint) ─────────────────────────────────
