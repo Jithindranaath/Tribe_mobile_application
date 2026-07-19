@@ -45,8 +45,11 @@ describe('TxLINEAuth', () => {
 
       await auth.acquireGuestJWT();
 
+      // /auth/guest/start is at the API root, not under /api — auth.ts strips
+      // the /api suffix from txlineApiBaseUrl before building this URL (the
+      // real TxLINE API 404s on /api/auth/guest/start; confirmed live).
       expect(global.fetch).toHaveBeenCalledWith(
-        'https://txline-dev.txodds.com/api/auth/guest/start',
+        'https://txline-dev.txodds.com/auth/guest/start',
         expect.objectContaining({
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -74,19 +77,20 @@ describe('TxLINEAuth', () => {
       });
 
       await expect(auth.acquireGuestJWT()).rejects.toThrow(
-        /Malformed response.*missing jwt or expiresIn/
+        /Malformed response.*missing jwt\/token field/
       );
     });
 
-    it('throws on malformed response (missing expiresIn)', async () => {
+    it('defaults expiresIn to 1 hour when missing (TxLINE may omit it)', async () => {
       global.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: async () => ({ jwt: 'token' }),
       });
 
-      await expect(auth.acquireGuestJWT()).rejects.toThrow(
-        /Malformed response.*missing jwt or expiresIn/
-      );
+      const result = await auth.acquireGuestJWT();
+
+      expect(result.jwt).toBe('token');
+      expect(result.expiresIn).toBe(3600);
     });
 
     it('computes expiration timestamp correctly', async () => {

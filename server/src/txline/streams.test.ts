@@ -113,8 +113,13 @@ describe('TxLINEStreamManager', () => {
 
       await manager.connectScoresStream();
 
+      // streams.ts appends the sub-path directly to txlineApiBaseUrl without
+      // adding its own /api segment — the base URL is expected to already
+      // include /api in production (confirmed live: adding a second /api here
+      // 404s against the real TxLINE API), so the test's base URL (which
+      // deliberately omits /api) should round-trip through unchanged.
       expect(fetchSpy).toHaveBeenCalledWith(
-        'https://txline-test.example.com/api/scores/stream',
+        'https://txline-test.example.com/scores/stream',
         expect.objectContaining({
           method: 'GET',
           headers: expect.objectContaining({
@@ -193,8 +198,9 @@ describe('TxLINEStreamManager', () => {
 
       await manager.connectOddsStream();
 
+      // Same reasoning as the scores-stream URL assertion above.
       expect(fetchSpy).toHaveBeenCalledWith(
-        'https://txline-test.example.com/api/odds/stream',
+        'https://txline-test.example.com/odds/stream',
         expect.objectContaining({
           method: 'GET',
           headers: expect.objectContaining({

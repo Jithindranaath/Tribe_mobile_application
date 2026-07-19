@@ -8,6 +8,7 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { SurgeService, buildSurgePayload } from './surge.js';
+import type { TribeIdResolver } from './surge.js';
 import type { Resolution } from './resolver.js';
 import type { CampfireWSServer } from '../ws/server.js';
 import type { SurgePayload } from '../ws/types.js';
@@ -82,13 +83,13 @@ describe('buildSurgePayload', () => {
 describe('SurgeService', () => {
   let mockWsServer: { broadcastSurge: ReturnType<typeof vi.fn> };
   let surgeService: SurgeService;
-  let tribeIdResolver: ReturnType<typeof vi.fn>;
+  let tribeIdResolver: ReturnType<typeof vi.fn<Parameters<TribeIdResolver>, ReturnType<TribeIdResolver>>>;
 
   beforeEach(() => {
     mockWsServer = {
       broadcastSurge: vi.fn(),
     };
-    tribeIdResolver = vi.fn().mockReturnValue('tribe-brazil-sp');
+    tribeIdResolver = vi.fn<Parameters<TribeIdResolver>, ReturnType<TribeIdResolver>>().mockReturnValue('tribe-brazil-sp');
     surgeService = new SurgeService({
       wsServer: mockWsServer as unknown as CampfireWSServer,
       tribeIdResolver,
