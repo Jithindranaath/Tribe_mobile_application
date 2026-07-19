@@ -17,13 +17,14 @@ import { KeeperEvaluator } from './keeper/evaluator.js';
 import { KeeperInjectService } from './keeper/injects.js';
 import { generateContextualReadPrompt, MatchContext } from './keeper/contextual.js';
 import { ReadResolver } from './services/resolver.js';
+import type { Resolution } from './services/resolver.js';
 import { SettlementQueue } from './services/settlement.js';
 import { SettlementExecutor } from './services/settler.js';
 import { buildSurgePayload } from './services/surge.js';
 import { PresenceService } from './services/presence.js';
 import { checkAndGrantSeerTitle } from './services/titles.js';
 import { commitRead } from './services/reads.js';
-import { getFanById } from './services/fans.js';
+import { getFanById, getTribeIdsByFanIds } from './services/fans.js';
 import { getOrCreateTribeAccount } from './services/onchain.js';
 import { broadcastConviction } from './services/conviction.js';
 import { registerPrompt, getPromptMeta, clearExpiredPrompts } from './services/prompt-registry.js';
@@ -290,16 +291,14 @@ async function startTxLINEPipeline(): Promise<void> {
   resolver.onResolution((fixtureId, resolutions) => {
     if (resolutions.length === 0) return;
 
-    // Immediate surge broadcast to every tribe currently watching this fixture.
-    // Reads aren't tribe-scoped in reads_live, so (matching broadcastMatchHeader's
-    // existing pattern) the same resolution set is broadcast to every active tribe
-    // room for this fixture rather than filtered per-tribe.
-    const payload = buildSurgePayload(fixtureId, resolutions);
-    if (payload) {
-      for (const tribeId of tribeIdResolver(fixtureId)) {
-        campfireWS.broadcastSurge(tribeId, fixtureId, payload);
-      }
-    }
+    // Surge broadcast, filtered to the tribe(s) whose fans actually made the
+    // resolved Reads — not every tribe room currently watching the fixture
+    // (that was the previous behavior; see progress notes for why it changed).
+    // One batch fan_id->tribe_id lookup keeps this within the <500ms budget
+    // (Requirement 12.1/12.5) regardless of how many tribes are involved.
+    broadcastSurgeByTribe(fixtureId, resolutions).catch((err) => {
+      console.error('[TRIBE] Surge broadcast failed:', err instanceof Error ? err.message : String(err));
+    });
 
     // Queue for batched on-chain settlement (60s window or 20 items, whichever first).
     settlementQueue.queue(resolutions);
@@ -541,6 +540,35 @@ async function refreshTribeRanks(): Promise<void> {
         rank: entry.rank,
         previousRank: prev,
       });
+    }
+  }
+}
+
+/**
+ * Broadcasts a surge, filtered to only the tribe(s) whose fans actually made
+ * the resolved Reads in this batch — not every tribe room currently watching
+ * the fixture. Groups resolutions by tribe (one batch fan_id->tribe_id
+ * lookup) and sends each tribe only its own fans' standing deltas.
+ */
+async function broadcastSurgeByTribe(fixtureId: string, resolutions: Resolution[]): Promise<void> {
+  const tribeIdByFanId = await getTribeIdsByFanIds(resolutions.map((r) => r.fanId));
+
+  const resolutionsByTribe = new Map<string, Resolution[]>();
+  for (const resolution of resolutions) {
+    const tribeId = tribeIdByFanId.get(resolution.fanId);
+    if (!tribeId) continue; // fan not found — shouldn't happen in practice, skip rather than guess
+    const existing = resolutionsByTribe.get(tribeId);
+    if (existing) {
+      existing.push(resolution);
+    } else {
+      resolutionsByTribe.set(tribeId, [resolution]);
+    }
+  }
+
+  for (const [tribeId, tribeResolutions] of resolutionsByTribe) {
+    const payload = buildSurgePayload(fixtureId, tribeResolutions);
+    if (payload) {
+      campfireWS.broadcastSurge(tribeId, fixtureId, payload);
     }
   }
 }

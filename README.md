@@ -177,6 +177,9 @@ npm test
 | Share cards via expo-sharing | ✅ |
 | Self-contained demo simulation | ✅ |
 | 14 property-based tests | ✅ |
+| Live TxLINE data streaming (real devnet, verified repeatedly) | ✅ |
+| Solana program deployed to devnet (`8Yc8JQutXw9rkS1VSYdGEkChGYJhkJKuw64v1CmdN5H8`) | ✅ |
+| Backend server deployed (OCI Compute, public URL) | ✅ |
 
 ---
 
@@ -184,9 +187,7 @@ npm test
 
 | Task | Blocker |
 |------|---------|
-| Real Privy auth | Needs Android Studio for development build |
-| Live TxLINE data streaming | Needs active World Cup match |
-| Solana program deployment | Anchor build/deploy (in progress) |
+| Real Privy auth confirmed end-to-end on a physical device | Needs Android Studio development build |
 | NativeWind styling in dev build | Needs `npx expo run:android` (Java + Android SDK) |
 | Production Lottie flame animations | Designer assets needed |
 

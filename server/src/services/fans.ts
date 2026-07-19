@@ -23,3 +23,31 @@ export async function getFanById(fanId: string): Promise<FansRow | null> {
 
   return data;
 }
+
+/**
+ * Batch fan_id -> tribe_id lookup, for grouping a set of resolved Reads by
+ * the tribe(s) whose fans actually made them (see surge tribe-filtering in
+ * index.ts). One query regardless of batch size, to stay within the surge
+ * broadcast's <500ms budget (Requirement 12.1/12.5).
+ */
+export async function getTribeIdsByFanIds(fanIds: string[]): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  if (fanIds.length === 0) return map;
+
+  const supabase = getSupabaseClient();
+  const { data, error } = await supabase
+    .from('fans')
+    .select('fan_id, tribe_id')
+    .in('fan_id', fanIds);
+
+  if (error) {
+    console.error('[fans] getTribeIdsByFanIds error:', error.message);
+    return map;
+  }
+
+  for (const row of (data ?? []) as Array<{ fan_id: string; tribe_id: string }>) {
+    map.set(row.fan_id, row.tribe_id);
+  }
+
+  return map;
+}
