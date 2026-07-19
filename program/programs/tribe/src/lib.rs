@@ -19,9 +19,12 @@ pub mod tribe {
         fan_account.reads_total = 0;
         fan_account.bump = ctx.bumps.fan_account;
 
-        // Increment tribe member count
+        // Increment tribe member count and aggregate standing (a fresh fan's
+        // initial 100 standing must be counted immediately, not just at their
+        // first settlement, or aggregate_standing undercounts every unsettled fan).
         let tribe_account = &mut ctx.accounts.tribe;
         tribe_account.member_count = tribe_account.member_count.checked_add(1).unwrap();
+        tribe_account.aggregate_standing = tribe_account.aggregate_standing.checked_add(100).unwrap();
 
         Ok(())
     }
@@ -74,6 +77,13 @@ pub mod tribe {
         if correct {
             fan_account.reads_correct = fan_account.reads_correct.checked_add(1).unwrap();
         }
+
+        // Update TribeAccount aggregate standing incrementally. (A full re-sum across every
+        // member's FanAccount would need remaining_accounts iteration — every settlement
+        // goes through this instruction, so an incremental update stays correct.)
+        let tribe_account = &mut ctx.accounts.tribe;
+        tribe_account.aggregate_standing =
+            ((tribe_account.aggregate_standing as i64) + standing_delta).max(0) as u64;
 
         Ok(())
     }
@@ -134,7 +144,7 @@ pub struct ReadRecord {
 pub struct CreateFanAccount<'info> {
     #[account(
         init,
-        payer = authority,
+        payer = payer,
         space = 8 + 90,
         seeds = [b"fan", authority.key().as_ref()],
         bump,
@@ -144,8 +154,13 @@ pub struct CreateFanAccount<'info> {
     #[account(mut)]
     pub tribe: Account<'info, TribeAccount>,
 
+    /// CHECK: the fan's embedded wallet pubkey, recorded as FanAccount.authority.
+    /// Does not need to sign — the server creates the account on the fan's behalf
+    /// (silent wallet architecture; the fan's private key is never held server-side).
+    pub authority: UncheckedAccount<'info>,
+
     #[account(mut)]
-    pub authority: Signer<'info>,
+    pub payer: Signer<'info>,
 
     pub system_program: Program<'info, System>,
 }
@@ -187,6 +202,9 @@ pub struct SettleRead<'info> {
 
     #[account(mut)]
     pub fan_account: Account<'info, FanAccount>,
+
+    #[account(mut)]
+    pub tribe: Account<'info, TribeAccount>,
 
     #[account(mut)]
     pub settler: Signer<'info>,
