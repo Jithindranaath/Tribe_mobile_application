@@ -28,6 +28,7 @@ import { getOrCreateTribeAccount } from './services/onchain.js';
 import { broadcastConviction } from './services/conviction.js';
 import { registerPrompt, getPromptMeta, clearExpiredPrompts } from './services/prompt-registry.js';
 import { rankService } from './services/rank.js';
+import { getLatestDifficultyMultiplier } from './txline/odds-tracker.js';
 import { setCachedTribeAggregateStanding } from './services/standing-cache.js';
 import { getSupabaseClient } from './lib/supabase.js';
 import type { TribeData } from './services/rank.js';
@@ -445,14 +446,17 @@ async function startTxLINEPipeline(): Promise<void> {
 
       // Generate contextual question (async, but don't block)
       try {
-        const question = await generateContextualReadPrompt(context);
+        const [question, difficultyMultiplier] = await Promise.all([
+          generateContextualReadPrompt(context),
+          getLatestDifficultyMultiplier(decision.fixtureId),
+        ]);
 
         const readPrompt: ReadPromptPayload = {
           readId: randomUUID(),
           readType: 'moment_read',
           question,
           options: ['Yes', 'No'],
-          difficultyMultiplier: 1.0,
+          difficultyMultiplier,
           expiresAt: Date.now() + 60_000, // 60 seconds to answer
         };
 

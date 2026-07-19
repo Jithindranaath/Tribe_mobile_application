@@ -10,6 +10,7 @@
 import { getSupabaseClient } from '../lib/supabase.js';
 import { campfireWS } from '../ws/server.js';
 import { getCachedTribeAggregateStanding } from './standing-cache.js';
+import { SEER_BITMASK } from './titles.js';
 import type { ReadsLiveRow } from '../db/schema.js';
 import type { ConvictionPayload } from '../ws/types.js';
 
@@ -25,6 +26,9 @@ export interface ConvictionResult {
 
 /** Fallback standing for a fan not found in the cache (shouldn't happen in practice). */
 const DEFAULT_FAN_STANDING = 100;
+
+/** Conviction-weight multiplier for fans holding the Seer title (Requirement 16.3). */
+const SEER_WEIGHT_MULTIPLIER = 1.2;
 
 // ─── Service Functions ───────────────────────────────────────────────────────
 
@@ -77,6 +81,41 @@ async function getStandingByFanId(fanIds: string[]): Promise<Map<string, number>
 }
 
 /**
+ * Fetches cached titles for a set of fans (`fans.cached_titles` — see
+ * standing-cache.ts). Kept as a separate query from getStandingByFanId
+ * deliberately: until migration 004_fan_titles.sql is applied, this query
+ * fails (column doesn't exist) — a combined query would take the already-
+ * working standing lookup down with it. Missing fans/failures both just mean
+ * "no titles," which is the correct fallback either way.
+ */
+async function getTitlesByFanId(fanIds: string[]): Promise<Map<string, number>> {
+  const supabase = getSupabaseClient();
+  const map = new Map<string, number>();
+
+  if (fanIds.length === 0) return map;
+
+  const { data, error } = await supabase
+    .from('fans')
+    .select('fan_id, cached_titles')
+    .in('fan_id', fanIds);
+
+  if (error) {
+    // Expected until migration 004_fan_titles.sql is applied — not logged as
+    // an error to avoid spamming logs on every conviction computation for a
+    // known, already-flagged gap (see progress notes).
+    return map;
+  }
+
+  for (const row of (data ?? []) as Array<{ fan_id: string; cached_titles: number | null }>) {
+    if (typeof row.cached_titles === 'number') {
+      map.set(row.fan_id, row.cached_titles);
+    }
+  }
+
+  return map;
+}
+
+/**
  * Computes the conviction signal for a given readId within a tribe.
  *
  * Algorithm:
@@ -89,12 +128,16 @@ async function getStandingByFanId(fanIds: string[]): Promise<Map<string, number>
  * @param aggregateStanding - The tribe's total aggregate standing (cached)
  * @param standingByFanId - Real per-fan standing (cached); fans not present
  *   fall back to DEFAULT_FAN_STANDING
+ * @param titlesByFanId - Real per-fan title bitmask (cached); fans holding
+ *   the Seer title (Requirement 16.3) get their weight multiplied by
+ *   SEER_WEIGHT_MULTIPLIER. Fans not present are treated as having no titles.
  * @returns ConvictionResult with signal normalized to [0.0, 1.0]
  */
 export function computeConvictionSignalFromReads(
   reads: ReadsLiveRow[],
   aggregateStanding: number,
   standingByFanId?: Map<string, number>,
+  titlesByFanId?: Map<string, number>,
 ): ConvictionResult {
   if (reads.length === 0) {
     return {
@@ -110,7 +153,13 @@ export function computeConvictionSignalFromReads(
 
   for (const read of reads) {
     const fanStanding = standingByFanId?.get(read.fan_id) ?? DEFAULT_FAN_STANDING;
-    const weight = aggregateStanding > 0 ? fanStanding / aggregateStanding : 0;
+    let weight = aggregateStanding > 0 ? fanStanding / aggregateStanding : 0;
+
+    const fanTitles = titlesByFanId?.get(read.fan_id) ?? 0;
+    if ((fanTitles & SEER_BITMASK) !== 0) {
+      weight *= SEER_WEIGHT_MULTIPLIER;
+    }
+
     weightedSum += weight * read.predicted;
     totalWeight += weight;
   }
@@ -141,12 +190,13 @@ export async function computeConvictionSignal(
     return { readId, signal: 0, participantCount: 0 };
   }
 
-  const [aggregateStanding, standingByFanId] = await Promise.all([
+  const [aggregateStanding, standingByFanId, titlesByFanId] = await Promise.all([
     getCachedTribeAggregateStanding(tribeId),
     getStandingByFanId(reads.map((r) => r.fan_id)),
+    getTitlesByFanId(reads.map((r) => r.fan_id)),
   ]);
 
-  const result = computeConvictionSignalFromReads(reads, aggregateStanding, standingByFanId);
+  const result = computeConvictionSignalFromReads(reads, aggregateStanding, standingByFanId, titlesByFanId);
   // Ensure readId is set correctly even when reads array is from a different source
   return { ...result, readId };
 }

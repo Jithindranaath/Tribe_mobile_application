@@ -1,15 +1,22 @@
 /**
  * Title System — checks and grants fan titles based on Read performance.
  *
- * For the hackathon: title grants are tracked off-chain (in-memory store).
- * Later: on-chain `grant_title` instruction will set the bitmask on FanAccount.
+ * Title grants are recorded on-chain (FanAccount.titles bitmask, via the
+ * `grant_title` instruction) so they survive server restarts and are the
+ * real source of truth. The in-memory `grantedTitles` map below is kept as a
+ * same-process fast-path cache to avoid a redundant on-chain grant attempt
+ * within one process's lifetime — `cached_titles` (fans table) is the
+ * cross-process/cross-restart cache conviction.ts actually reads from.
  *
  * Seer title: granted when reads_correct / reads_total > 0.75 AND reads_total >= 20
  *
- * Requirements: 16.1
+ * Requirements: 16.1, 16.2
  */
 
 import { getSupabaseClient } from '../lib/supabase.js';
+import { getFanById } from './fans.js';
+import { grantTitleOnChain } from './onchain.js';
+import { setCachedFanTitles } from './standing-cache.js';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -77,15 +84,37 @@ export async function checkSeerTitle(fanId: string): Promise<boolean> {
 }
 
 /**
- * Grants the Seer title to a fan (in-memory for hackathon).
- * Sets the SEER_BITMASK bit in the fan's title bitmask.
+ * Grants the Seer title to a fan: calls the on-chain `grant_title`
+ * instruction (source of truth), updates `cached_titles` (fans table, so
+ * conviction.ts's weight multiplier sees it without an RPC call), and
+ * updates the in-memory same-process cache.
  *
- * Later: will call on-chain `grant_title` instruction.
+ * Looks up the fan's wallet address via `getFanById` — grant_title needs it
+ * to derive the FanAccount PDA, same as settleReadOnChain does.
  */
-export function grantSeerTitle(fanId: string): void {
+export async function grantSeerTitle(fanId: string): Promise<void> {
+  const fan = await getFanById(fanId);
+  if (!fan) {
+    console.error(`[Titles] Cannot grant Seer title — fan ${fanId} not found`);
+    return;
+  }
+
+  try {
+    await grantTitleOnChain(fan.wallet_pubkey, SEER_BITMASK);
+  } catch (err) {
+    console.error(
+      `[Titles] On-chain grant_title failed for fan ${fanId}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    return; // don't update caches if the on-chain write didn't actually happen
+  }
+
   const current = grantedTitles.get(fanId) ?? 0;
-  grantedTitles.set(fanId, current | SEER_BITMASK);
-  console.log(`[Titles] Granted Seer title to fan ${fanId}`);
+  const updated = current | SEER_BITMASK;
+  grantedTitles.set(fanId, updated);
+  await setCachedFanTitles(fanId, updated);
+
+  console.log(`[Titles] Granted Seer title to fan ${fanId} (on-chain + cached)`);
 }
 
 /**
@@ -121,7 +150,7 @@ export async function checkAndGrantSeerTitle(fanId: string): Promise<boolean> {
     return false;
   }
 
-  grantSeerTitle(fanId);
+  await grantSeerTitle(fanId);
   return true;
 }
 

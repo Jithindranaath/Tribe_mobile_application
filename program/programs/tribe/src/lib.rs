@@ -85,9 +85,39 @@ pub mod tribe {
         tribe_account.aggregate_standing =
             ((tribe_account.aggregate_standing as i64) + standing_delta).max(0) as u64;
 
+        // Update Flame — collective tribe morale. Spec calls for a batch-level
+        // flame_delta (positive if correct_ratio > 0.5, negative if < 0.5), but
+        // settlement here processes one Read at a time (no batch context on-chain)
+        // — same shape of deviation as aggregate_standing above. A single correct
+        // Read is a 1.0 ratio (> 0.5 -> gain), a single incorrect Read is 0.0
+        // (< 0.5 -> loss), so gain/loss per-read is the natural per-read analogue.
+        // Asymmetric (gain less than the loss) so Flame reflects sustained
+        // accuracy rather than being trivially pumped by volume.
+        if correct {
+            tribe_account.flame = tribe_account.flame.saturating_add(FLAME_GAIN_ON_CORRECT);
+        } else {
+            tribe_account.flame = tribe_account.flame.saturating_sub(FLAME_LOSS_ON_INCORRECT);
+        }
+
+        Ok(())
+    }
+
+    /// Grants a title to a fan by setting bit(s) in FanAccount.titles.
+    /// Preserves all other bits already set (spec 16.2 / 21.3) — e.g. Seer is
+    /// bit 0x01. Same authority model as settle_read: any signer (service
+    /// wallet in practice) — no separate admin check, matching the existing
+    /// hackathon-grade trust model rather than introducing new complexity.
+    pub fn grant_title(ctx: Context<GrantTitle>, title_bitmask: u8) -> Result<()> {
+        let fan_account = &mut ctx.accounts.fan_account;
+        fan_account.titles |= title_bitmask;
         Ok(())
     }
 }
+
+/// Flame gained on a correctly-resolved Read.
+const FLAME_GAIN_ON_CORRECT: u64 = 10;
+/// Flame lost on an incorrectly-resolved Read.
+const FLAME_LOSS_ON_INCORRECT: u64 = 5;
 
 // ============================================================
 // Account structures
@@ -210,4 +240,12 @@ pub struct SettleRead<'info> {
     pub settler: Signer<'info>,
 
     pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct GrantTitle<'info> {
+    #[account(mut)]
+    pub fan_account: Account<'info, FanAccount>,
+
+    pub settler: Signer<'info>,
 }

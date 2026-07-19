@@ -137,6 +137,42 @@ export type Tribe = {
       ]
     },
     {
+      "name": "grantTitle",
+      "docs": [
+        "Grants a title to a fan by setting bit(s) in FanAccount.titles.",
+        "Preserves all other bits already set (spec 16.2 / 21.3) — e.g. Seer is",
+        "bit 0x01. Same authority model as settle_read: any signer (service",
+        "wallet in practice) — no separate admin check, matching the existing",
+        "hackathon-grade trust model rather than introducing new complexity."
+      ],
+      "discriminator": [
+        93,
+        60,
+        234,
+        214,
+        108,
+        196,
+        117,
+        195
+      ],
+      "accounts": [
+        {
+          "name": "fanAccount",
+          "writable": true
+        },
+        {
+          "name": "settler",
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "titleBitmask",
+          "type": "u8"
+        }
+      ]
+    },
+    {
       "name": "settleRead",
       "docs": [
         "Settle resolved Reads: create ReadRecord and update FanAccount standing."

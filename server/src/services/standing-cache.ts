@@ -71,3 +71,30 @@ export async function bumpCachedTribeAggregateStanding(tribeId: string, delta: n
   const current = await getCachedTribeAggregateStanding(tribeId);
   await setCachedTribeAggregateStanding(tribeId, current + delta);
 }
+
+// ─── Fan titles ────────────────────────────────────────────────────────────
+//
+// Same pattern as fan standing above, for FanAccount.titles (see migration
+// 004_fan_titles.sql). Exists so conviction.ts's Seer weight multiplier can
+// read a fan's titles without a live on-chain RPC call on the hot conviction
+// path — titles.ts's grant flow updates this cache in the same step as the
+// on-chain grant_title write.
+
+export async function getCachedFanTitles(fanId: string): Promise<number> {
+  const supabase = getSupabaseClient();
+  const { data } = await supabase
+    .from('fans')
+    .select('cached_titles')
+    .eq('fan_id', fanId)
+    .maybeSingle();
+
+  return typeof data?.cached_titles === 'number' ? data.cached_titles : 0;
+}
+
+export async function setCachedFanTitles(fanId: string, titles: number): Promise<void> {
+  const supabase = getSupabaseClient();
+  const { error } = await supabase.from('fans').update({ cached_titles: titles }).eq('fan_id', fanId);
+  if (error) {
+    console.error('[standing-cache] Failed to set fan cached_titles:', error.message);
+  }
+}

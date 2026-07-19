@@ -35,6 +35,23 @@ vi.mock('../lib/supabase.js', () => {
 
 import { getSupabaseClient } from '../lib/supabase.js';
 
+// ─── Mock fans/onchain/standing-cache ────────────────────────────────────────
+//
+// grantSeerTitle now calls the on-chain grant_title instruction (looking up
+// the fan's wallet via getFanById) and updates the cached_titles cache — mock
+// all three so the "Seer" describe blocks below can stay focused on the
+// bitmask/idempotence logic without needing real Supabase/Solana calls.
+
+vi.mock('./fans.js', () => ({
+  getFanById: vi.fn().mockResolvedValue({ fan_id: 'fan-1', wallet_pubkey: '11111111111111111111111111111111' }),
+}));
+vi.mock('./onchain.js', () => ({
+  grantTitleOnChain: vi.fn().mockResolvedValue({ txSignature: 'mock-sig' }),
+}));
+vi.mock('./standing-cache.js', () => ({
+  setCachedFanTitles: vi.fn().mockResolvedValue(undefined),
+}));
+
 /**
  * Helper: creates a mock supabase client that returns specified counts.
  * Simulates the chained query builder pattern.
@@ -157,24 +174,24 @@ describe('Titles Service — Seer', () => {
   });
 
   describe('grantSeerTitle()', () => {
-    it('should grant Seer title to a fan', () => {
-      grantSeerTitle('fan-1');
+    it('should grant Seer title to a fan', async () => {
+      await grantSeerTitle('fan-1');
       expect(hasSeerTitle('fan-1')).toBe(true);
     });
 
-    it('should set the correct bitmask bit', () => {
-      grantSeerTitle('fan-1');
+    it('should set the correct bitmask bit', async () => {
+      await grantSeerTitle('fan-1');
       expect(getTitleBitmask('fan-1')).toBe(SEER_BITMASK);
     });
 
-    it('should be idempotent — granting twice does not change bitmask', () => {
-      grantSeerTitle('fan-1');
-      grantSeerTitle('fan-1');
+    it('should be idempotent — granting twice does not change bitmask', async () => {
+      await grantSeerTitle('fan-1');
+      await grantSeerTitle('fan-1');
       expect(getTitleBitmask('fan-1')).toBe(SEER_BITMASK);
     });
 
-    it('should not affect other fans', () => {
-      grantSeerTitle('fan-1');
+    it('should not affect other fans', async () => {
+      await grantSeerTitle('fan-1');
       expect(hasSeerTitle('fan-2')).toBe(false);
     });
   });
@@ -184,8 +201,8 @@ describe('Titles Service — Seer', () => {
       expect(hasSeerTitle('fan-unknown')).toBe(false);
     });
 
-    it('should return true after grant', () => {
-      grantSeerTitle('fan-1');
+    it('should return true after grant', async () => {
+      await grantSeerTitle('fan-1');
       expect(hasSeerTitle('fan-1')).toBe(true);
     });
   });
@@ -195,8 +212,8 @@ describe('Titles Service — Seer', () => {
       expect(getTitleBitmask('fan-none')).toBe(0);
     });
 
-    it('should return SEER_BITMASK after Seer grant', () => {
-      grantSeerTitle('fan-1');
+    it('should return SEER_BITMASK after Seer grant', async () => {
+      await grantSeerTitle('fan-1');
       expect(getTitleBitmask('fan-1')).toBe(0x01);
     });
   });
@@ -261,7 +278,7 @@ describe('Titles Service — Seer', () => {
     });
 
     it('should return false if fan already has Seer title', async () => {
-      grantSeerTitle('fan-1');
+      await grantSeerTitle('fan-1');
       // Should not even query the DB
       const granted = await checkAndGrantSeerTitle('fan-1');
       expect(granted).toBe(false);
@@ -283,9 +300,9 @@ describe('Titles Service — Seer', () => {
   });
 
   describe('_resetTitleStore()', () => {
-    it('should clear all granted titles', () => {
-      grantSeerTitle('fan-1');
-      grantSeerTitle('fan-2');
+    it('should clear all granted titles', async () => {
+      await grantSeerTitle('fan-1');
+      await grantSeerTitle('fan-2');
       _resetTitleStore();
       expect(hasSeerTitle('fan-1')).toBe(false);
       expect(hasSeerTitle('fan-2')).toBe(false);

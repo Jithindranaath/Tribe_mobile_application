@@ -309,3 +309,31 @@ export async function settleReadOnChain(input: SettleReadInput): Promise<{ txSig
 
   return { txSignature };
 }
+
+// ─── Titles: grant_title ───────────────────────────────────────────────────────
+
+/**
+ * Grants a title to a fan on-chain by OR-ing `titleBitmask` into
+ * FanAccount.titles (preserves any bits already set). Paid and signed by the
+ * service wallet, same authority model as settle_read.
+ */
+export async function grantTitleOnChain(
+  walletAddress: string,
+  titleBitmask: number,
+): Promise<{ txSignature: string }> {
+  const program = getProgram();
+  const wallet = loadServiceWallet();
+  const authority = new PublicKey(walletAddress);
+  const fanPda = deriveFanPda(authority);
+
+  const txSignature = await program.methods
+    .grantTitle(titleBitmask)
+    .accounts({
+      fanAccount: fanPda,
+      settler: wallet.publicKey,
+    })
+    .signers([wallet])
+    .rpc();
+
+  return { txSignature };
+}

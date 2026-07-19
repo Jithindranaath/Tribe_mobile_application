@@ -139,4 +139,46 @@ describe('computeConvictionSignalFromReads', () => {
 
     expect(result.readId).toBe('prompt-xyz');
   });
+
+  describe('Seer title weight multiplier (Requirement 16.3)', () => {
+    it('gives a Seer-titled fan 1.2x the weight of a non-titled fan', () => {
+      // Fan A (Seer, predicted 1): weight 100/200 * 1.2 = 0.6
+      // Fan B (no title, predicted 0): weight 100/200 = 0.5
+      // signal = (0.6*1 + 0.5*0) / (0.6 + 0.5) = 0.6/1.1
+      const reads = [
+        makeRead({ predicted: 1, fan_id: 'fan-seer' }),
+        makeRead({ predicted: 0, fan_id: 'fan-plain' }),
+      ];
+      const titlesByFanId = new Map([['fan-seer', 0x01]]);
+      const result = computeConvictionSignalFromReads(reads, 200, undefined, titlesByFanId);
+
+      expect(result.signal).toBeCloseTo(0.6 / 1.1, 5);
+    });
+
+    it('is a no-op when no fan has a title', () => {
+      const reads = [
+        makeRead({ predicted: 1, fan_id: 'fan-1' }),
+        makeRead({ predicted: 0, fan_id: 'fan-2' }),
+      ];
+      const withEmptyTitles = computeConvictionSignalFromReads(reads, 200, undefined, new Map());
+      const withoutTitlesArg = computeConvictionSignalFromReads(reads, 200);
+
+      expect(withEmptyTitles.signal).toBe(withoutTitlesArg.signal);
+    });
+
+    it('ignores non-Seer bits in the titles bitmask', () => {
+      // Bit 0x02 (some other, unrelated title) set but not 0x01 (Seer) on
+      // fan-1 — should NOT get the 1.2x multiplier, so this should match the
+      // plain equal-weight case exactly (2/3), not the Seer-boosted case.
+      const reads = [
+        makeRead({ predicted: 1, fan_id: 'fan-1' }),
+        makeRead({ predicted: 0, fan_id: 'fan-2' }),
+        makeRead({ predicted: 1, fan_id: 'fan-3' }),
+      ];
+      const titlesByFanId = new Map([['fan-1', 0x02]]);
+      const result = computeConvictionSignalFromReads(reads, 300, undefined, titlesByFanId);
+
+      expect(result.signal).toBeCloseTo(2 / 3, 5);
+    });
+  });
 });
