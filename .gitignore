@@ -34,6 +34,9 @@ program/target/
 .DS_Store
 Thumbs.db
 
+# Session progress tracking (private working notes, not for public repo)
+progress/
+
 # Documentation files (not needed in public repo)
 architecture.md
 context.md
