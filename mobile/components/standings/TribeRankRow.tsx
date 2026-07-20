@@ -1,6 +1,6 @@
 import { memo } from "react";
 import { View, Text } from "react-native";
-import Animated, { Layout } from "react-native-reanimated";
+import Animated, { LinearTransition } from "react-native-reanimated";
 import type { TribeRanking } from "../../types";
 
 /**
@@ -10,8 +10,8 @@ import type { TribeRanking } from "../../types";
  * and accuracy percentage. Shows a rank change indicator (↑ or ↓) when
  * previousRank differs from the current rank.
  *
- * Uses react-native-reanimated Layout.springify() to animate smooth rank
- * transitions when the list reorders.
+ * Uses react-native-reanimated LinearTransition.springify() to animate
+ * smooth rank transitions when the list reorders.
  *
  * Requirements: 7.3, 7.5, 14.2
  */
@@ -40,7 +40,7 @@ function TribeRankRowInner({ item }: TribeRankRowProps) {
 
   return (
     <Animated.View
-      layout={Layout.springify()}
+      layout={LinearTransition.springify()}
       className="flex-row items-center bg-dark-surface rounded-xl mx-4 mb-2 p-3"
     >
       {/* Rank number */}

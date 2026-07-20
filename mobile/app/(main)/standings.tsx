@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
 import { View, Text, RefreshControl } from "react-native";
-import Animated, { Layout } from "react-native-reanimated";
+import Animated, { LinearTransition } from "react-native-reanimated";
 import { useStandingsStore, useAuthStore } from "../../stores";
 import {
   StandingsSegmentControl,
@@ -129,7 +129,7 @@ export default function StandingsScreen() {
         maxToRenderPerBatch={10}
         windowSize={5}
         removeClippedSubviews
-        itemLayoutAnimation={Layout.springify()}
+        itemLayoutAnimation={LinearTransition.springify()}
       />
     </View>
   );
