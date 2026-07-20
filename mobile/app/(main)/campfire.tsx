@@ -43,7 +43,7 @@ export default function CampfireScreen() {
         minute: 0,
         state: "live",
       },
-      presence: { activeCount: 34, tribeId: "demo" },
+      presence: { count: 34, tribeId: "demo", fixtureId: "demo-1" },
       conviction: { signal: 20, percentage: 15, tribeId: "demo" },
       flameIntensity: "dim",
     });
@@ -61,7 +61,7 @@ export default function CampfireScreen() {
       // Simulate events at specific minutes
       if (min === 3) {
         useCampfireStore.setState({
-          presence: { activeCount: 56, tribeId: "demo" },
+          presence: { count: 56, tribeId: "demo", fixtureId: "demo-1" },
           conviction: { signal: 35, percentage: 28, tribeId: "demo" },
           flameIntensity: signalToIntensity(35),
         });
@@ -84,7 +84,7 @@ export default function CampfireScreen() {
           },
           conviction: { signal: 55, percentage: 48, tribeId: "demo" },
           flameIntensity: signalToIntensity(55),
-          presence: { activeCount: 78, tribeId: "demo" },
+          presence: { count: 78, tribeId: "demo", fixtureId: "demo-1" },
         });
       }
       if (min === 12) {
@@ -93,7 +93,7 @@ export default function CampfireScreen() {
           matchHeader: s.matchHeader ? { ...s.matchHeader, homeScore: 1 } : null,
           conviction: { signal: 80, percentage: 72, tribeId: "demo" },
           flameIntensity: signalToIntensity(80),
-          presence: { activeCount: 95, tribeId: "demo" },
+          presence: { count: 95, tribeId: "demo", fixtureId: "demo-1" },
           keeperMessage: { message: "GOAL!! Brazil strikes first! 🎉", emotion: "euphoric" },
         }));
         setTimeout(() => useCampfireStore.setState({ keeperMessage: null }), 4000);
@@ -109,7 +109,7 @@ export default function CampfireScreen() {
         useCampfireStore.setState({
           conviction: { signal: 90, percentage: 85, tribeId: "demo" },
           flameIntensity: signalToIntensity(90),
-          presence: { activeCount: 112, tribeId: "demo" },
+          presence: { count: 112, tribeId: "demo", fixtureId: "demo-1" },
           keeperMessage: { message: "The crowd is on fire! Blazing energy!", emotion: "euphoric" },
         });
         setTimeout(() => useCampfireStore.setState({ keeperMessage: null }), 4000);
@@ -200,7 +200,7 @@ export default function CampfireScreen() {
             <Text style={styles.statLabel}>Committed</Text>
           </View>
           <View style={styles.statBox}>
-            <Text style={styles.statValue}>{presence?.activeCount ?? 0}</Text>
+            <Text style={styles.statValue}>{presence?.count ?? 0}</Text>
             <Text style={styles.statLabel}>Active</Text>
           </View>
           <View style={styles.statBox}>

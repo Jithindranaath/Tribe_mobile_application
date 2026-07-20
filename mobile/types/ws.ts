@@ -21,9 +21,15 @@ export interface WSMessage<T extends WSEventType = WSEventType> {
 
 // ─── Payload Types ───────────────────────────────────────────────────────────
 
+// Matches the server's real broadcastPresence payload shape exactly
+// (server/src/ws/types.ts) — the two must agree since count/activeCount
+// mismatched here silently sat at 0 forever (real presence data arrived,
+// this field just didn't exist on it) until this was caught by watching a
+// real WS connection's raw messages.
 export interface PresencePayload {
-  activeCount: number;
   tribeId: string;
+  fixtureId: string;
+  count: number;
 }
 
 export interface ConvictionPayload {

@@ -50,7 +50,7 @@ export default function ReplayScreen() {
       fixtureId: fixtureId ?? null,
       connected: false, // no real WS connection in replay
       matchHeader: buildInitialMatchHeader(fixtureId),
-      presence: { activeCount: 0, tribeId: fan?.tribeId ?? "" },
+      presence: { count: 0, tribeId: fan?.tribeId ?? "", fixtureId: fixtureId ?? "" },
       conviction: { signal: 0, percentage: 0, tribeId: fan?.tribeId ?? "" },
       flameIntensity: "dim",
       activePrompt: null,
@@ -407,8 +407,9 @@ function applyReplayEvent(event: ReplayEvent, tribeId: string) {
     case "presence":
       useCampfireStore.setState({
         presence: {
-          activeCount: event.data.activeCount as number,
+          count: event.data.activeCount as number,
           tribeId,
+          fixtureId: store.fixtureId ?? "",
         },
       });
       break;

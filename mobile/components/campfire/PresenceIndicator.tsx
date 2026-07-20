@@ -24,7 +24,7 @@ import { useCampfireStore } from "../../stores/useCampfireStore";
 export function PresenceIndicator() {
   const presence = useCampfireStore((s) => s.presence);
 
-  const activeCount = presence?.activeCount ?? 0;
+  const activeCount = presence?.count ?? 0;
 
   // Shared value for breathing dot scale animation
   const dotScale = useSharedValue(0.8);
