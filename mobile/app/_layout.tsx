@@ -1,3 +1,13 @@
+// NativeWind v4 needs this imported somewhere the bundler actually sees, not
+// just referenced as metro.config.js's withNativeWind `input` option — that
+// only wires the build-time babel/metro pipeline. Without this import, the
+// generated Tailwind styles never get registered into NativeWind's runtime
+// style resolver, so every `className` prop anywhere in the app silently
+// resolves to nothing (no error — screens using className just render
+// completely unstyled, which is exactly what standings/legacy/profile.tsx
+// were doing; onboarding/campfire/_layout.tsx never hit this because they
+// happen to use plain StyleSheet instead of className).
+import "../global.css";
 import { useFonts } from "expo-font";
 import { Stack } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
