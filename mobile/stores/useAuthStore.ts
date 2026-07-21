@@ -14,8 +14,6 @@ interface AuthState {
   selectedTribeName: string | null;
   /** Display name for the selected macro tribe (team/country), e.g. "Brazil" */
   selectedMacroTribe: string | null;
-  /** Login via social provider (stub — real impl delegates to Privy SDK) */
-  login: (provider: "google" | "apple" | "email") => Promise<void>;
   /** Clear auth state */
   logout: () => void;
   /** Set the selected tribe */
@@ -29,13 +27,6 @@ export const useAuthStore = create<AuthState>((set) => ({
   selectedTribeId: null,
   selectedTribeName: null,
   selectedMacroTribe: null,
-
-  login: async (_provider) => {
-    // Actual implementation will integrate with Privy RN SDK
-    // and POST to /api/auth/register on the server.
-    // This is a store-level placeholder; the hook/provider will
-    // call set() with the real fan profile and token after auth.
-  },
 
   logout: () =>
     set({

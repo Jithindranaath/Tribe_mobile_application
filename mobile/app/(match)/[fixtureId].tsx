@@ -43,10 +43,16 @@ export default function MatchScreen() {
   }, [fixtureId]);
 
   // Connect to the WebSocket for real-time match data using the deep-linked fixtureId
-  const { isOffline, retry } = useCampfireSocket({
+  const { isOffline, retry, sendReadCommit } = useCampfireSocket({
     tribeId: fan?.tribeId ?? "",
     fixtureId: fixtureId ?? "",
+    fanId: fan?.fanId,
   });
+
+  useEffect(() => {
+    useCampfireStore.getState().setWsSendReadCommit(sendReadCommit);
+    return () => useCampfireStore.getState().setWsSendReadCommit(null);
+  }, [sendReadCommit]);
 
   return (
     <View className="flex-1 bg-dark-bg pt-12 px-4">

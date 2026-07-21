@@ -48,6 +48,11 @@ interface CampfireState {
   deepLinkTribeId: string | null;
   deepLinkShareCardId: string | null;
 
+  // Live WS send function for read_commit, registered by whichever screen
+  // is currently running useCampfireSocket() — lets ReadPromptCard reach
+  // the real WebSocket connection without prop-drilling through 3 screens.
+  wsSendReadCommit: ((readId: string, predicted: number) => boolean) | null;
+
   // Actions
   commitRead: (readId: string, predicted: number) => void;
   dismissPrompt: () => void;
@@ -55,6 +60,7 @@ interface CampfireState {
   setTribeContext: (tribeId: string) => void;
   setShareCardFromDeepLink: (cardId: string) => void;
   clearDeepLinkContext: () => void;
+  setWsSendReadCommit: (fn: ((readId: string, predicted: number) => boolean) | null) => void;
 }
 
 export const useCampfireStore = create<CampfireState>((set, get) => ({
@@ -93,7 +99,11 @@ export const useCampfireStore = create<CampfireState>((set, get) => ({
   deepLinkTribeId: null,
   deepLinkShareCardId: null,
 
+  wsSendReadCommit: null,
+
   // ─── Actions ─────────────────────────────────────────────────────────────────
+
+  setWsSendReadCommit: (fn) => set({ wsSendReadCommit: fn }),
 
   commitRead: (readId, predicted) => {
     const { committedReadIds, pendingReads, activePrompt } = get();

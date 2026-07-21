@@ -16,6 +16,8 @@ export interface TimelineMoment {
 export interface WrappedStats {
   matchesWatched: number;
   readsMade: number;
+  readsCorrect: number;
+  currentStreak: number;
   accuracyPercentage: number;
   bestCall: string;
   earnedTitles: string[];

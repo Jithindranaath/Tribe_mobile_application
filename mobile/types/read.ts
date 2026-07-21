@@ -10,14 +10,16 @@ export interface PendingRead {
   question: string;
 }
 
+/**
+ * Flat shape — matches the server's real `ClientReadCommitMessage`
+ * (server/src/ws/types.ts) exactly. The server derives fanId/tribeId/
+ * fixtureId from the authenticated WS connection itself, not the message
+ * body, so those aren't sent here.
+ */
 export interface ReadCommitMessage {
   type: 'read_commit';
-  payload: {
-    readId: string;
-    predicted: number;
-    fanId: string;
-    timestamp: number;
-  };
+  readId: string;
+  predicted: number;
 }
 
 export interface ReadPromptPayload {

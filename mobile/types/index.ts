@@ -20,4 +20,5 @@ export type {
   KeeperInjectPayload,
   StandingUpdatePayload,
   ShareCardReadyPayload,
+  MatchHeaderPayload,
 } from './ws';

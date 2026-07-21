@@ -8,22 +8,22 @@ describe('Property 14: Read commit message schema validity', () => {
       fc.property(
         fc.uuid(),
         fc.oneof(fc.constant(0), fc.constant(1)),
-        fc.uuid(),
-        (readId, predicted, fanId) => {
-          const message = buildCommitMessage(readId, predicted, fanId);
+        (readId, predicted) => {
+          const message = buildCommitMessage(readId, predicted);
 
           // type must be 'read_commit'
           expect(message.type).toBe('read_commit');
 
-          // payload must have exactly readId, predicted, fanId, timestamp
-          expect(message.payload.readId).toBe(readId);
-          expect(message.payload.predicted).toBe(predicted);
-          expect(message.payload.fanId).toBe(fanId);
-
-          // timestamp must be a positive integer (ms since epoch)
-          expect(typeof message.payload.timestamp).toBe('number');
-          expect(message.payload.timestamp).toBeGreaterThan(0);
-          expect(Number.isInteger(message.payload.timestamp)).toBe(true);
+          // Flat shape — must match the server's real ClientReadCommitMessage
+          // (server/src/ws/types.ts) exactly: {type, readId, predicted}. The
+          // server derives fanId/fixtureId from the authenticated connection,
+          // not the message body — a previous version of this message (and
+          // this test) used a nested `payload: {...}` shape that the server
+          // never actually understood, so every WS-channel commit was
+          // silently dropped.
+          expect(message.readId).toBe(readId);
+          expect(message.predicted).toBe(predicted);
+          expect('payload' in message).toBe(false);
         }
       ),
       { numRuns: 100 }

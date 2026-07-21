@@ -109,6 +109,7 @@ export async function normalizeScoreEvent(rawEvent: TxLINERawScoreEvent): Promis
     'UNKNOWN';
   const stats = rawEvent.Stats ?? {};
   const participant1IsHome = rawEvent.Participant1IsHome ?? true;
+  const clockSeconds = rawEvent.Clock?.Seconds;
 
   // ── Persist raw event to match_events for audit trail ────────────────────
   await storeMatchEvent(fixtureId, seq, ts, gameState, rawEvent);
@@ -120,10 +121,21 @@ export async function normalizeScoreEvent(rawEvent: TxLINERawScoreEvent): Promis
 
   const prev = previousMatchState.get(fixtureId);
 
+  // VAR reviews produce transient Stats fluctuations on non-'goal' actions
+  // (e.g. a goal briefly counted then "action_amend"-ed back out during
+  // review, or "var_end"/"corner" events carrying a stale goals count from
+  // a different code path) — comparing against every event's goals count
+  // causes spurious extra GOAL_EVENTs. Confirmed against a real match: only
+  // Action === 'goal' events reliably reflect the confirmed score; only
+  // those are used for goal delta detection and cache updates.
+  const isGoalAction = rawEvent.Action === 'goal';
+
   if (prev) {
-    // ── Detect goals (delta on total goals per participant) ────────────────
-    emitGoalDeltas(fixtureId, seq, ts, gameState, p1Goals - prev.p1Goals, participant1IsHome ? 'home' : 'away');
-    emitGoalDeltas(fixtureId, seq, ts, gameState, p2Goals - prev.p2Goals, participant1IsHome ? 'away' : 'home');
+    if (isGoalAction) {
+      // ── Detect goals (delta on total goals per participant) ────────────────
+      emitGoalDeltas(fixtureId, seq, ts, gameState, p1Goals - prev.p1Goals, participant1IsHome ? 'home' : 'away', clockSeconds);
+      emitGoalDeltas(fixtureId, seq, ts, gameState, p2Goals - prev.p2Goals, participant1IsHome ? 'away' : 'home', clockSeconds);
+    }
 
     // ── Detect red cards (delta on total red cards per participant) ────────
     emitRedCardDeltas(fixtureId, seq, ts, gameState, p1RedCards - prev.p1RedCards);
@@ -146,9 +158,11 @@ export async function normalizeScoreEvent(rawEvent: TxLINERawScoreEvent): Promis
   }
 
   // ── Update cached state ───────────────────────────────────────────────────
+  // Goals only update from confirmed 'goal'-action events (see above); every
+  // other field updates from every event as before.
   previousMatchState.set(fixtureId, {
-    p1Goals,
-    p2Goals,
+    p1Goals: isGoalAction ? p1Goals : (prev?.p1Goals ?? p1Goals),
+    p2Goals: isGoalAction ? p2Goals : (prev?.p2Goals ?? p2Goals),
     p1RedCards,
     p2RedCards,
     statusId,
@@ -165,10 +179,11 @@ function emitGoalDeltas(
   gameState: string,
   delta: number,
   team: 'home' | 'away',
+  clockSeconds?: number,
 ): void {
   if (delta <= 0) return;
   for (let i = 0; i < delta; i++) {
-    const goalEvent: GoalEvent = { fixtureId, seq, timestamp: ts, gameState, team };
+    const goalEvent: GoalEvent = { fixtureId, seq, timestamp: ts, gameState, team, clockSeconds };
     eventBus.emit(GOAL_EVENT, goalEvent);
   }
 }

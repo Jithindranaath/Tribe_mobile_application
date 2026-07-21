@@ -8,6 +8,8 @@ interface TimelineState {
   moments: TimelineMoment[];
   /** Wrapped tournament summary stats */
   wrappedStats: WrappedStats | null;
+  /** Real standing-over-time series (see server's /api/fan/:fanId/timeline) */
+  standingHistory: number[];
   /** Whether a fetch is in progress */
   isLoading: boolean;
   /** Fetch the fan's timeline from the server */
@@ -17,6 +19,7 @@ interface TimelineState {
 export const useTimelineStore = create<TimelineState>((set) => ({
   moments: [],
   wrappedStats: null,
+  standingHistory: [],
   isLoading: false,
 
   fetchTimeline: async () => {
@@ -31,6 +34,7 @@ export const useTimelineStore = create<TimelineState>((set) => ({
         set({
           moments: result.data.moments,
           wrappedStats: result.data.wrapped,
+          standingHistory: result.data.standingHistory,
         });
       }
     } finally {

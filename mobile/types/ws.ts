@@ -11,7 +11,8 @@ export type WSEventType =
   | 'surge'
   | 'keeper_inject'
   | 'standing_update'
-  | 'share_card_ready';
+  | 'share_card_ready'
+  | 'match_header';
 
 export interface WSMessage<T extends WSEventType = WSEventType> {
   type: T;
@@ -61,4 +62,14 @@ export interface ShareCardReadyPayload {
   cardId: string;
   imageUrl: string;
   readId: string;
+}
+
+export interface MatchHeaderPayload {
+  fixtureId: string;
+  homeTeam: string;
+  awayTeam: string;
+  homeScore: number;
+  awayScore: number;
+  minute: number;
+  state: 'scheduled' | 'live' | 'finished';
 }

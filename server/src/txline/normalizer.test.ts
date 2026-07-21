@@ -43,6 +43,7 @@ function makeEvent(overrides: Partial<TxLINERawScoreEvent> = {}): TxLINERawScore
     Participant1Id: 1,
     Participant2Id: 2,
     Stats: { '1': 0, '2': 0, '5': 0, '6': 0 },
+    Action: 'goal',
     ...overrides,
   };
 }
@@ -168,6 +169,38 @@ describe('normalizeScoreEvent', () => {
       await normalizeScoreEvent(makeEvent({ Stats: { '1': 2, '2': 0, '5': 0, '6': 0 } }));
 
       expect(events).toHaveLength(2);
+    });
+
+    it('ignores a goals-count bump on a non-goal Action (VAR review noise) — real match seq 1060 case', async () => {
+      setPreviousScore('12345', 0, 0);
+
+      const events: GoalEvent[] = [];
+      eventBus.on(GOAL_EVENT, (e) => events.push(e));
+
+      // A VAR-review event carries a transient/stale goals bump — must not count.
+      await normalizeScoreEvent(
+        makeEvent({ Action: 'var_end', Stats: { '1': 1, '2': 0, '5': 0, '6': 0 } }),
+      );
+      expect(events).toHaveLength(0);
+
+      // A later non-goal event "corrects" it back down — still not a goal.
+      await normalizeScoreEvent(
+        makeEvent({ Action: 'action_amend', Stats: { '1': 0, '2': 0, '5': 0, '6': 0 } }),
+      );
+      expect(events).toHaveLength(0);
+
+      // The real confirmed goal, tagged Action: 'goal' — this is the one real delta.
+      await normalizeScoreEvent(
+        makeEvent({ Action: 'goal', Stats: { '1': 1, '2': 0, '5': 0, '6': 0 } }),
+      );
+      expect(events).toHaveLength(1);
+      expect(events[0].team).toBe('home');
+
+      // A further VAR event after the real goal, with an inflated stale count — ignored.
+      await normalizeScoreEvent(
+        makeEvent({ Action: 'var_end', Stats: { '1': 2, '2': 0, '5': 0, '6': 0 } }),
+      );
+      expect(events).toHaveLength(1);
     });
   });
 

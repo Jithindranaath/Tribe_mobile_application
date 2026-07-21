@@ -11,7 +11,8 @@ export type WSEventType =
   | 'keeper_inject'
   | 'standing_update'
   | 'share_card_ready'
-  | 'rank_update';
+  | 'rank_update'
+  | 'match_header';
 
 /**
  * Base envelope for all WebSocket messages.
@@ -78,6 +79,16 @@ export interface RankUpdatePayload {
   previousRank?: number;
 }
 
+export interface MatchHeaderPayload {
+  fixtureId: string;
+  homeTeam: string;
+  awayTeam: string;
+  homeScore: number;
+  awayScore: number;
+  minute: number;
+  state: 'scheduled' | 'live' | 'finished';
+}
+
 // ─── Typed Message Aliases ───────────────────────────────────────────────────
 
 export type PresenceMessage = WSMessage<'presence', PresencePayload>;
@@ -88,6 +99,7 @@ export type KeeperInjectMessage = WSMessage<'keeper_inject', KeeperInjectPayload
 export type StandingUpdateMessage = WSMessage<'standing_update', StandingUpdatePayload>;
 export type ShareCardReadyMessage = WSMessage<'share_card_ready', ShareCardReadyPayload>;
 export type RankUpdateMessage = WSMessage<'rank_update', RankUpdatePayload>;
+export type MatchHeaderMessage = WSMessage<'match_header', MatchHeaderPayload>;
 
 /**
  * Union of all outbound message types.
@@ -100,7 +112,8 @@ export type OutboundWSMessage =
   | KeeperInjectMessage
   | StandingUpdateMessage
   | ShareCardReadyMessage
-  | RankUpdateMessage;
+  | RankUpdateMessage
+  | MatchHeaderMessage;
 
 // ─── Client → Server Messages ────────────────────────────────────────────────
 

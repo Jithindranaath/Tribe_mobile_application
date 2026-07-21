@@ -46,7 +46,7 @@ export const useStandingsStore = create<StandingsState>((set) => ({
       const result = await apiFetchStandings(tribeId, view);
 
       if (result.ok) {
-        const rankings = result.data;
+        const { rankings, personalStanding, personalRank } = result.data;
         const viewKey =
           view === "global"
             ? "globalRankings"
@@ -54,15 +54,10 @@ export const useStandingsStore = create<StandingsState>((set) => ({
               ? "countryRankings"
               : "cityRankings";
 
-        // Find the fan's personal rank within the fetched rankings
-        const fanRanking = rankings.find((r) => r.tribeId === tribeId);
-
         set({
           [viewKey]: rankings,
-          ...(fanRanking && {
-            personalStanding: fanRanking.aggregateStanding,
-            personalRank: fanRanking.rank,
-          }),
+          personalStanding,
+          personalRank,
         });
       }
     } finally {

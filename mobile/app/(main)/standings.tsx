@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { View, Text, RefreshControl } from "react-native";
 import Animated, { LinearTransition } from "react-native-reanimated";
 import { useStandingsStore, useAuthStore } from "../../stores";
@@ -32,6 +32,14 @@ export default function StandingsScreen() {
   const fetchStandings = useStandingsStore((s) => s.fetchStandings);
 
   const fan = useAuthStore((s) => s.fan);
+
+  // Fetch on mount — previously this only happened on pull-to-refresh or a
+  // segment-tab change, so the screen always opened to "No standings data
+  // available" until the user manually refreshed.
+  useEffect(() => {
+    fetchStandings(activeView);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Determine which rankings list to display based on active view
   const rankings: TribeRanking[] =

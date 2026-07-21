@@ -7,6 +7,8 @@ import Animated, {
 } from "react-native-reanimated";
 import * as Haptics from "expo-haptics";
 import { useCampfireStore } from "../../stores/useCampfireStore";
+import { useAuthStore } from "../../stores/useAuthStore";
+import { commitReadWithFallback } from "../../lib/api";
 
 const SCREEN_HEIGHT = Dimensions.get("window").height;
 const CARD_HEIGHT = 280;
@@ -30,6 +32,7 @@ export function ReadPromptCard() {
   const committedReadIds = useCampfireStore((s) => s.committedReadIds);
   const commitRead = useCampfireStore((s) => s.commitRead);
   const dismissPrompt = useCampfireStore((s) => s.dismissPrompt);
+  const fan = useAuthStore((s) => s.fan);
 
   const [remainingSeconds, setRemainingSeconds] = useState<number>(0);
   const [hasCommitted, setHasCommitted] = useState(false);
@@ -115,13 +118,29 @@ export function ReadPromptCard() {
   // Handle YES/NO tap
   const handleCommit = useCallback(
     (predicted: number) => {
-      if (!activePrompt) return;
+      if (!activePrompt || !fan) return;
 
       // Prevent duplicate commits
       if (committedReadIds.has(activePrompt.readId)) return;
 
-      // Send commit
+      // Local optimistic UI update (pending-read indicator, dedup tracking)
       commitRead(activePrompt.readId, predicted);
+
+      // The real commit — WS-first with REST fallback. Previously this
+      // never happened at all: commitRead() above only ever touched local
+      // state, so no prediction a fan made was ever recorded server-side.
+      const { fixtureId, wsSendReadCommit } = useCampfireStore.getState();
+      commitReadWithFallback(
+        activePrompt.readId,
+        predicted,
+        fan.fanId,
+        Number(fixtureId),
+        activePrompt.readType,
+        activePrompt.multiplier,
+        wsSendReadCommit ?? undefined,
+      ).catch((error) => {
+        console.error("[ReadPromptCard] Failed to commit read:", error);
+      });
 
       // Trigger medium haptic feedback
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
@@ -129,7 +148,7 @@ export function ReadPromptCard() {
       // Show awaiting state
       setHasCommitted(true);
     },
-    [activePrompt, committedReadIds, commitRead]
+    [activePrompt, committedReadIds, commitRead, fan]
   );
 
   // Don't render anything if no active prompt

@@ -17,7 +17,8 @@
 import { getEnvConfig } from '../config/env.js';
 import { TxLINEActivation } from './activation.js';
 import { normalizeScoreEvent, type TxLINERawScoreEvent } from './normalizer.js';
-import type { FixturesRow } from '../db/schema.js';
+import type { FixturesRow, MatchEventsRow } from '../db/schema.js';
+import { getSupabaseClient } from '../lib/supabase.js';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -260,6 +261,19 @@ export class ReplayManager {
    * Requirement 3.2: Select recently-finished fixture from valid window.
    */
   async selectReplayFixture(): Promise<TxLINEFixture | null> {
+    const candidates = await this.listReplayCandidates();
+    return candidates.length > 0 ? candidates[0] : null;
+  }
+
+  /**
+   * Lists recently-finished fixtures within the valid replay window, sorted
+   * highest-priority first (same filtering/scoring as `selectReplayFixture`,
+   * which just takes the top result). Used to power a fixture picker UI with
+   * real TxLINE data instead of a hardcoded list.
+   *
+   * Window: between 6 hours and 14 days after kickoff.
+   */
+  async listReplayCandidates(): Promise<TxLINEFixture[]> {
     try {
       const fixtures = await this._fetchFixtures();
       const now = Date.now();
@@ -272,8 +286,6 @@ export class ReplayManager {
         return age >= MIN_FIXTURE_AGE_MS && age <= MAX_FIXTURE_AGE_MS;
       });
 
-      if (candidates.length === 0) return null;
-
       // Score and sort candidates by priority
       const scored = candidates.map((f) => ({
         fixture: f,
@@ -281,9 +293,26 @@ export class ReplayManager {
       }));
 
       scored.sort((a, b) => b.score - a.score);
-      return scored[0].fixture;
+      return scored.map((s) => s.fixture);
     } catch (error) {
-      console.error('[ReplayManager] Error selecting replay fixture:', error);
+      console.error('[ReplayManager] Error listing replay candidates:', error);
+      return [];
+    }
+  }
+
+  /**
+   * Looks up a single fixture's real team names by ID, regardless of state
+   * (scheduled/live/finished) — unlike `listReplayCandidates()`, which only
+   * returns finished fixtures within the replay window. Used to auto-populate
+   * real team names for genuinely live fixtures the scores stream starts
+   * tracking, instead of leaving them as the "Home"/"Away" defaults.
+   */
+  async lookupFixture(fixtureId: string): Promise<TxLINEFixture | null> {
+    try {
+      const fixtures = await this._fetchFixtures();
+      return fixtures.find((f) => f.fixtureId === fixtureId) ?? null;
+    } catch (error) {
+      console.error('[ReplayManager] Error looking up fixture:', error);
       return null;
     }
   }
@@ -516,6 +545,23 @@ export class ReplayManager {
    * Requirement 3.3: GET /api/scores/historical/{fixtureId}
    */
   private async defaultFetchHistoricalData(fixtureId: string): Promise<TxLINERawScoreEvent[]> {
+    // Prefer our own verified live-captured events over TxLINE's /scores/historical
+    // endpoint when we have them. Found via direct comparison for fixture 18257739
+    // (the real World Cup Final): the live feed we captured while the match was
+    // actually being played showed a single real goal, but TxLINE's *historical*
+    // replay endpoint for the same fixtureId returns 3 distinct goal deltas at 3
+    // different seq/timestamps — real API data, but not an accurate reproduction
+    // of what actually happened (devnet/sandbox historical data, decoupled from
+    // real-world results). Our own match_events capture is ground truth since
+    // it's exactly what was ingested in real time as the match was live.
+    const verifiedEvents = await this.fetchVerifiedLiveCapturedEvents(fixtureId);
+    if (verifiedEvents && verifiedEvents.length > 0) {
+      console.log(
+        `[ReplayManager] Using ${verifiedEvents.length} verified live-captured events for fixture ${fixtureId} instead of TxLINE's historical endpoint`,
+      );
+      return verifiedEvents;
+    }
+
     const { txlineApiBaseUrl } = getEnvConfig();
     // txlineApiBaseUrl already includes /api — do not add another /api segment here.
     const url = `${txlineApiBaseUrl}/scores/historical/${fixtureId}`;
@@ -542,6 +588,51 @@ export class ReplayManager {
     // NOT a JSON array. Parse it the same way as the live SSE stream.
     const bodyText = await response.text();
     return parseHistoricalScoreEvents(bodyText);
+  }
+
+  /**
+   * Fetches our own real-time-captured match_events for a fixture (if any),
+   * deduplicated by seq (repeated manual replay triggers insert the same
+   * seq multiple times) and sorted. Requires a substantial capture (300+
+   * unique events) to qualify — a handful of stray rows isn't a full match.
+   */
+  private async fetchVerifiedLiveCapturedEvents(
+    fixtureId: string,
+  ): Promise<TxLINERawScoreEvent[] | null> {
+    try {
+      const supabase = getSupabaseClient();
+      const seen = new Map<number, MatchEventsRow>();
+      // Page through in batches of 1000 (Supabase's default REST cap) until exhausted.
+      let from = 0;
+      const pageSize = 1000;
+      for (;;) {
+        const { data, error } = await supabase
+          .from('match_events')
+          .select('seq, ts, event_json')
+          .eq('fixture_id', Number(fixtureId))
+          .order('seq', { ascending: true })
+          .range(from, from + pageSize - 1);
+
+        if (error || !data || data.length === 0) break;
+        for (const row of data as unknown as MatchEventsRow[]) {
+          seen.set(row.seq, row);
+        }
+        if (data.length < pageSize) break;
+        from += pageSize;
+      }
+
+      if (seen.size < 300) return null;
+
+      return Array.from(seen.values())
+        .sort((a, b) => a.seq - b.seq)
+        .map((row) => row.event_json as unknown as TxLINERawScoreEvent);
+    } catch (err) {
+      console.error(
+        '[ReplayManager] Failed to check for verified live-captured events:',
+        err instanceof Error ? err.message : String(err),
+      );
+      return null;
+    }
   }
 }
 

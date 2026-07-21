@@ -22,6 +22,8 @@ export interface GoalEvent {
   gameState: string;
   team: 'home' | 'away';
   player?: string;
+  /** Elapsed match-clock seconds from TxLINE's `Clock.Seconds`, when present — gives an exact minute instead of a rough phase-based guess. */
+  clockSeconds?: number;
 }
 
 export interface RedCardEvent {

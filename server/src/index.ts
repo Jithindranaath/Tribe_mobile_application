@@ -62,9 +62,14 @@ const matchStates = new Map<string, MatchState>();
 
 let replayManager: ReplayManager | null = null;
 
+const fixtureNameLookupsInFlight = new Set<string>();
+
 /**
  * Get or initialize a match state for a fixture.
- * Default team names are placeholders until configured via the live fixture data.
+ * Default team names ('Home'/'Away') are placeholders — kicks off a
+ * one-time async lookup against real TxLINE fixture data to replace them.
+ * (The manual demo replay route also sets real names explicitly up front,
+ * which just makes this lookup a no-op confirmation for that path.)
  */
 function getMatchState(fixtureId: string): MatchState {
   if (!matchStates.has(fixtureId)) {
@@ -76,8 +81,40 @@ function getMatchState(fixtureId: string): MatchState {
       minute: 0,
       gameState: '1H',
     });
+    autoConfigureTeamNames(fixtureId);
   }
   return matchStates.get(fixtureId)!;
+}
+
+/**
+ * Fire-and-forget lookup of a fixture's real team names, for fixtures the
+ * live scores stream starts tracking without ever going through the manual
+ * demo replay route (which sets names explicitly). Without this, a
+ * genuinely live fixture's fans would see literal "Home"/"Away" forever.
+ */
+function autoConfigureTeamNames(fixtureId: string): void {
+  if (!replayManager || fixtureNameLookupsInFlight.has(fixtureId)) return;
+  fixtureNameLookupsInFlight.add(fixtureId);
+
+  replayManager
+    .lookupFixture(fixtureId)
+    .then((fixture) => {
+      const state = matchStates.get(fixtureId);
+      if (!fixture || !state) return;
+      // Don't clobber a name already set explicitly (e.g. by the demo route).
+      if (state.homeTeam === 'Home') state.homeTeam = fixture.homeTeam;
+      if (state.awayTeam === 'Away') state.awayTeam = fixture.awayTeam;
+      if (state.homeTeam !== 'Home') broadcastMatchHeader(fixtureId, state);
+    })
+    .catch((err) => {
+      console.error(
+        `[TRIBE] Failed to auto-configure team names for fixture ${fixtureId}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    })
+    .finally(() => {
+      fixtureNameLookupsInFlight.delete(fixtureId);
+    });
 }
 
 // ─── Tribe ID Resolver ─────────────────────────────────────────────────────
@@ -118,7 +155,7 @@ app.post('/api/demo/broadcast', (req, res) => {
 // streamHistoricalEvents(), which runs events through the exact same
 // normalizeScoreEvent() → event bus path as the live scores stream.
 app.post('/api/demo/replay', async (req, res) => {
-  const { fixtureId, playbackSpeed } = req.body;
+  const { fixtureId, playbackSpeed, homeTeam, awayTeam } = req.body;
   if (!fixtureId) {
     return res.status(400).json({ error: 'Missing fixtureId' });
   }
@@ -140,6 +177,13 @@ app.post('/api/demo/replay', async (req, res) => {
   // the displayed match state (homeScore/awayScore accumulator) so each run starts fresh.
   resetScoresCacheForFixture(String(fixtureId));
   matchStates.delete(String(fixtureId));
+
+  // Optional real team names (e.g. from GET /api/fixtures/historical) so connected
+  // clients see a real scoreboard immediately, not just once the first goal fires.
+  const state = getMatchState(String(fixtureId));
+  if (homeTeam) state.homeTeam = homeTeam;
+  if (awayTeam) state.awayTeam = awayTeam;
+  broadcastMatchHeader(String(fixtureId), state);
 
   console.log(`[TRIBE] Manual replay triggered for fixture ${fixtureId} at ${playbackSpeed ?? 1}x speed`);
   replayManager.streamHistoricalEvents(String(fixtureId)).catch((err) => {
@@ -166,6 +210,242 @@ app.get('/api/demo/replay/status', (_req, res) => {
     isReplayActive: replayManager.isReplayActive,
     currentFixtureId: replayManager.currentFixtureId,
   });
+});
+
+// Real recently-finished fixtures available for Replay Mode, sourced from the
+// live TxLINE /fixtures/snapshot API (same fixture-discovery logic used to
+// auto-select a replay fixture) — not a hardcoded list.
+app.get('/api/fixtures/historical', async (_req, res) => {
+  if (!replayManager) {
+    return res.status(503).json({ error: 'Replay manager not initialized — TxLINE pipeline may not have started (check TXLINE_API_TOKEN)' });
+  }
+  try {
+    const candidates = await replayManager.listReplayCandidates();
+    return res.json(
+      candidates.map((f) => ({
+        fixtureId: Number(f.fixtureId),
+        sport: f.sport,
+        league: f.league,
+        homeTeam: f.homeTeam,
+        awayTeam: f.awayTeam,
+        kickoff: f.kickoff,
+        state: f.state,
+      })),
+    );
+  } catch (err) {
+    console.error('[TRIBE] Failed to list historical fixtures:', err instanceof Error ? err.message : String(err));
+    return res.status(502).json({ error: 'Failed to fetch fixtures from TxLINE' });
+  }
+});
+
+// Real tribe standings, grouped by city (exact tribeId), country (macro_tribe),
+// or global (all tribes) — sourced from the real `fans` table (cached_standing),
+// not mocked. Was previously missing entirely (404), which the mobile client's
+// error handling silently swallowed into "No standings data available".
+app.get('/api/tribe/:tribeId/standings', async (req, res) => {
+  const { tribeId } = req.params;
+  const view = (req.query.view as string) ?? 'city';
+  const supabase = getSupabaseClient();
+
+  const { data: fans, error } = await supabase
+    .from('fans')
+    .select('tribe_id, tribe_name, macro_tribe, cached_standing');
+
+  if (error) {
+    console.error('[TRIBE] Failed to load standings:', error.message);
+    return res.status(502).json({ error: 'Failed to load standings' });
+  }
+
+  const rows = (fans ?? []) as Array<{
+    tribe_id: string;
+    tribe_name: string;
+    macro_tribe: string;
+    cached_standing: number;
+  }>;
+
+  const groupKey = (f: (typeof rows)[number]) =>
+    view === 'global' ? 'Global' : view === 'country' ? f.macro_tribe : f.tribe_id;
+  const groupName = (f: (typeof rows)[number]) =>
+    view === 'global' ? 'Global' : view === 'country' ? f.macro_tribe : f.tribe_name;
+
+  const groups = new Map<
+    string,
+    { tribeId: string; tribeName: string; aggregateStanding: number; memberCount: number }
+  >();
+  for (const f of rows) {
+    const key = groupKey(f);
+    const existing = groups.get(key);
+    if (existing) {
+      existing.aggregateStanding += f.cached_standing;
+      existing.memberCount += 1;
+    } else {
+      groups.set(key, {
+        tribeId: key,
+        tribeName: groupName(f),
+        aggregateStanding: f.cached_standing,
+        memberCount: 1,
+      });
+    }
+  }
+
+  // Real accuracy per group — resolved reads where predicted === resolved.
+  const fanTribeMap = new Map(rows.map((f) => [f.tribe_id, groupKey(f)]));
+  const { data: reads } = await supabase
+    .from('reads_live')
+    .select('fan_id, predicted, resolved')
+    .not('resolved', 'is', null);
+  const { data: fanTribeLookup } = await supabase.from('fans').select('fan_id, tribe_id');
+  const fanIdToGroup = new Map<string, string>();
+  for (const f of (fanTribeLookup ?? []) as Array<{ fan_id: string; tribe_id: string }>) {
+    const group = fanTribeMap.get(f.tribe_id);
+    if (group) fanIdToGroup.set(f.fan_id, group);
+  }
+  const accuracyCounts = new Map<string, { correct: number; total: number }>();
+  for (const r of (reads ?? []) as Array<{ fan_id: string; predicted: number; resolved: number }>) {
+    const group = fanIdToGroup.get(r.fan_id);
+    if (!group) continue;
+    const counts = accuracyCounts.get(group) ?? { correct: 0, total: 0 };
+    counts.total += 1;
+    if (r.predicted === r.resolved) counts.correct += 1;
+    accuracyCounts.set(group, counts);
+  }
+
+  const rankings = Array.from(groups.values())
+    .sort((a, b) => b.aggregateStanding - a.aggregateStanding)
+    .map((g, i) => {
+      const counts = accuracyCounts.get(g.tribeId);
+      return {
+        tribeId: g.tribeId,
+        tribeName: g.tribeName,
+        aggregateStanding: g.aggregateStanding,
+        memberCount: g.memberCount,
+        accuracyPercentage: counts && counts.total > 0 ? Math.round((counts.correct / counts.total) * 100) : 0,
+        rank: i + 1,
+      };
+    });
+
+  // The requesting fan's own rank within THIS view's ranked list — computed
+  // separately from the `rankings.find(r => r.tribeId === tribeId)` the
+  // client used to do, which only ever matched on the 'city' view
+  // (global/country group keys are 'Global'/macro_tribe, not the raw
+  // tribeId, so that lookup silently found nothing and the personal
+  // standing card stuck at 0). Standing itself is always the fan's own
+  // individual cached_standing — never the group's aggregate total, even
+  // on views where the ranked rows themselves are aggregated — "Your
+  // Standing" means the fan's own number in every view, just their rank
+  // position within that view's grouping.
+  const requestingFan = rows.find((f) => f.tribe_id === tribeId);
+  const personalGroupKey = requestingFan ? groupKey(requestingFan) : null;
+  const personalEntry = personalGroupKey
+    ? rankings.find((r) => r.tribeId === personalGroupKey)
+    : undefined;
+
+  return res.json({
+    rankings,
+    personalStanding: requestingFan?.cached_standing ?? 0,
+    personalRank: personalEntry?.rank ?? 0,
+  });
+});
+
+// Real fan timeline (Legacy tab) — sourced from the `timeline` table (populated
+// by services/moments.ts for notable Read outcomes), not mocked. Was previously
+// missing entirely (404), silently shown as "No moments yet".
+app.get('/api/fan/:fanId/timeline', async (req, res) => {
+  const { fanId } = req.params;
+  const supabase = getSupabaseClient();
+
+  const { data: moments, error } = await supabase
+    .from('timeline')
+    .select('*')
+    .eq('fan_id', fanId)
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    console.error('[TRIBE] Failed to load timeline:', error.message);
+    return res.status(502).json({ error: 'Failed to load timeline' });
+  }
+
+  const rows = (moments ?? []) as Array<{
+    id: string;
+    fan_id: string;
+    fixture_id: number;
+    type: string;
+    payload_json: Record<string, unknown>;
+    created_at: string;
+  }>;
+
+  const mapped = rows.map((m) => {
+    const p = m.payload_json as {
+      readType?: string;
+      predicted?: number;
+      correct?: boolean;
+      standingDelta?: number;
+    };
+    return {
+      id: m.id,
+      fanId: m.fan_id,
+      fixtureId: m.fixture_id,
+      type: m.type,
+      match: `Fixture ${m.fixture_id}`,
+      prediction: p.readType ? `${p.readType}: ${p.predicted === 1 ? 'Yes' : 'No'}` : 'Read',
+      outcome: p.correct ? `Correct! +${p.standingDelta ?? 0} Standing` : 'Incorrect',
+      createdAt: m.created_at,
+    };
+  });
+
+  const { data: reads } = await supabase
+    .from('reads_live')
+    .select('fixture_id, predicted, resolved, standing_delta, committed_at')
+    .eq('fan_id', fanId)
+    .order('committed_at', { ascending: true });
+  const readRows = (reads ?? []) as Array<{
+    fixture_id: number;
+    predicted: number;
+    resolved: number | null;
+    standing_delta: number | null;
+    committed_at: string;
+  }>;
+  const resolvedReads = readRows.filter((r) => r.resolved !== null);
+  const correctReads = resolvedReads.filter((r) => r.predicted === r.resolved);
+
+  // Real standing-over-time series: starts at the fixed initial Standing
+  // (100, same as on-chain FanAccount init — see services/onchain.ts) and
+  // walks forward through each resolved read's real standing_delta in
+  // commit order. Not synthetic/fabricated — every point is a real
+  // settled outcome. Only resolved reads move the needle (pending ones
+  // haven't affected Standing yet).
+  const INITIAL_STANDING = 100;
+  const standingHistory: number[] = [INITIAL_STANDING];
+  let running = INITIAL_STANDING;
+  for (const r of resolvedReads) {
+    running += r.standing_delta ?? 0;
+    standingHistory.push(running);
+  }
+
+  // Current consecutive-correct streak: walk backward from the most
+  // recently resolved read until hitting an incorrect one.
+  let currentStreak = 0;
+  for (let i = resolvedReads.length - 1; i >= 0; i--) {
+    if (resolvedReads[i].predicted === resolvedReads[i].resolved) {
+      currentStreak++;
+    } else {
+      break;
+    }
+  }
+
+  const wrapped = {
+    matchesWatched: new Set(readRows.map((r) => r.fixture_id)).size,
+    readsMade: readRows.length,
+    readsCorrect: correctReads.length,
+    currentStreak,
+    accuracyPercentage:
+      resolvedReads.length > 0 ? Math.round((correctReads.length / resolvedReads.length) * 100) : 0,
+    bestCall: mapped.find((m) => m.outcome.startsWith('Correct'))?.prediction ?? 'None yet',
+    earnedTitles: [] as string[],
+    standingGained: readRows.reduce((sum, r) => sum + (r.standing_delta ?? 0), 0),
+  };
+
+  return res.json({ moments: mapped, wrapped, standingHistory });
 });
 
 // ─── Match state update endpoint (set team names for a fixture) ────────────
@@ -377,10 +657,10 @@ async function startTxLINEPipeline(): Promise<void> {
     state.gameState = event.gameState;
 
     // Estimate minute from game state (rough — TxLINE doesn't always send minute)
-    const minuteEstimate = estimateMinute(event.gameState, event.timestamp);
+    const minuteEstimate = estimateMinute(event.gameState, event.timestamp, event.clockSeconds);
     state.minute = minuteEstimate;
 
-    console.log(`[TRIBE] ⚽ GOAL: ${state.homeTeam} ${state.homeScore}-${state.awayScore} ${state.awayTeam} (${event.team}, min ${minuteEstimate})`);
+    console.log(`[TRIBE] ⚽ GOAL: ${state.homeTeam} ${state.homeScore}-${state.awayScore} ${state.awayTeam} (${event.team}, min ${minuteEstimate}, seq=${event.seq}, ts=${new Date(event.timestamp).toISOString()})`);
 
     // Broadcast match header update to all tribes watching this fixture
     broadcastMatchHeader(event.fixtureId, state);
@@ -574,22 +854,26 @@ async function broadcastSurgeByTribe(fixtureId: string, resolutions: Resolution[
 }
 
 /**
- * Broadcast a match header update to all connected tribes for a fixture.
- * The mobile app's useCampfireSocket handles 'conviction' type events with match data.
+ * Broadcast a match header update (team names, score, minute, state) to all
+ * connected tribes for a fixture, so the client's "Waiting for match data…"
+ * placeholder resolves to a real scoreboard.
  */
 function broadcastMatchHeader(fixtureId: string, state: MatchState): void {
   const tribeIds = tribeIdResolver(fixtureId);
-  const presenceCount = tribeIds.reduce((sum, tribeId) => {
-    return sum + campfireWS.getPresenceCount(tribeId, fixtureId);
-  }, 0);
+  const clientState: 'scheduled' | 'live' | 'finished' =
+    state.gameState === 'FINISHED' || state.gameState === 'F' ? 'finished' : 'live';
 
   for (const tribeId of tribeIds) {
     campfireWS.broadcastToTribe(tribeId, fixtureId, {
-      type: 'conviction',
+      type: 'match_header',
       payload: {
-        readId: `match_header_${fixtureId}`,
-        signal: Math.min(presenceCount / 100, 1.0), // Normalize presence to 0-1 signal
-        participantCount: presenceCount,
+        fixtureId,
+        homeTeam: state.homeTeam,
+        awayTeam: state.awayTeam,
+        homeScore: state.homeScore,
+        awayScore: state.awayScore,
+        minute: state.minute,
+        state: clientState,
       },
       timestamp: Date.now(),
     });
@@ -597,17 +881,36 @@ function broadcastMatchHeader(fixtureId: string, state: MatchState): void {
 }
 
 /**
- * Rough minute estimate based on game state and timestamp.
- * TxLINE doesn't always send an explicit minute field.
+ * Match minute for a goal. Prefers TxLINE's real elapsed match-clock seconds
+ * (`Clock.Seconds`, passed through as `clockSeconds`) when available — exact,
+ * and correctly reflects extra time (e.g. 6339s = 105', not "45" for every
+ * goal regardless of when it happened). Falls back to a rough per-phase
+ * midpoint only when clock data is missing.
+ *
+ * The fallback's phase strings must match normalizer.ts's real
+ * GAME_PHASE_BY_STATUS_ID values (H1/HT/H2/F/ET1/ET2/FET/FINISHED, not
+ * '1H'/'FT'/'AET' etc.) — the previous version used the wrong strings
+ * entirely, so it silently fell through to the "45" default for every
+ * gameState except the one that happened to match ('HT').
  */
-function estimateMinute(gameState: string, _timestamp: number): number {
+function estimateMinute(gameState: string, _timestamp: number, clockSeconds?: number): number {
+  if (clockSeconds !== undefined && clockSeconds >= 0) {
+    return Math.floor(clockSeconds / 60);
+  }
   switch (gameState) {
-    case '1H': return 25; // Rough midpoint of first half
+    case 'H1': return 25; // rough midpoint of first half
     case 'HT': return 45;
-    case '2H': return 65; // Rough midpoint of second half
-    case 'FT': return 90;
-    case 'ET': return 105;
-    case 'AET': return 120;
+    case 'H2': return 70; // rough midpoint of second half
+    case 'F': return 90;
+    case 'WET': return 90; // waiting for extra time
+    case 'ET1': return 98; // rough midpoint of first ET half (90-105)
+    case 'HTET': return 105;
+    case 'ET2': return 112; // rough midpoint of second ET half (105-120)
+    case 'FET': return 120;
+    case 'WPE': return 120; // waiting for penalties
+    case 'PE': return 120;
+    case 'FPE': return 120;
+    case 'FINISHED': return 120;
     default: return 45;
   }
 }

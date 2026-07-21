@@ -30,16 +30,26 @@ export type ApiResult<T> =
 
 export type CommitChannel = 'websocket' | 'rest';
 
+/**
+ * Body for POST /api/read/commit (server/src/routes/reads.ts) — the REST
+ * fallback path is stateless per-request, so (unlike the WS path) it needs
+ * fixtureId/readType/oddsAtCommit explicitly; the server can't derive them
+ * from a connection.
+ */
 export interface ReadCommitPayload {
   readId: string;
   predicted: number;
   fanId: string;
-  timestamp: number;
+  fixtureId: number;
+  readType: string;
+  oddsAtCommit: number;
 }
 
 export interface TimelineResponse {
   moments: TimelineMoment[];
   wrapped: WrappedStats;
+  /** Real standing-over-time series (starts at the initial 100, one point per resolved read) — not synthetic. */
+  standingHistory: number[];
 }
 
 export interface RegisterPayload {
@@ -85,22 +95,19 @@ export function getCommitChannel(connected: boolean): CommitChannel {
 }
 
 /**
- * Builds a ReadCommitMessage from the given parameters.
+ * Builds a ReadCommitMessage from the given parameters. Flat shape — the
+ * server (server/src/ws/server.ts) derives fanId/tribeId/fixtureId from the
+ * authenticated WS connection itself, not the message body.
  * Exported for testability (Property 14).
  */
 export function buildCommitMessage(
   readId: string,
   predicted: number,
-  fanId: string,
 ): ReadCommitMessage {
   return {
     type: 'read_commit',
-    payload: {
-      readId,
-      predicted,
-      fanId,
-      timestamp: Date.now(),
-    },
+    readId,
+    predicted,
   };
 }
 
@@ -131,6 +138,15 @@ export async function fetchLiveFixtures(): Promise<ApiResult<Fixture[]>> {
   }
 }
 
+export interface StandingsResult {
+  rankings: TribeRanking[];
+  /** The requesting fan's own aggregate standing within this view — computed
+   *  server-side since the view's group key ('Global'/macro_tribe/tribeId)
+   *  doesn't always match the fan's raw tribeId for lookup client-side. */
+  personalStanding: number;
+  personalRank: number;
+}
+
 /**
  * GET /api/tribe/:tribeId/standings?view=global|country|city
  * Fetches tribe standings for the specified view.
@@ -138,7 +154,7 @@ export async function fetchLiveFixtures(): Promise<ApiResult<Fixture[]>> {
 export async function fetchStandings(
   tribeId: string,
   view: 'global' | 'country' | 'city',
-): Promise<ApiResult<TribeRanking[]>> {
+): Promise<ApiResult<StandingsResult>> {
   try {
     const response = await fetch(
       `${BASE_URL}/api/tribe/${encodeURIComponent(tribeId)}/standings?view=${view}`,
@@ -152,7 +168,7 @@ export async function fetchStandings(
       return { ok: false, error: `HTTP ${response.status}: ${response.statusText}` };
     }
 
-    const data: TribeRanking[] = await response.json();
+    const data: StandingsResult = await response.json();
     return { ok: true, data };
   } catch (error) {
     return {
@@ -252,40 +268,53 @@ export async function registerFan(
 
 /**
  * Commits a Read prediction using the appropriate channel:
- * - If WebSocket is connected → sends ReadCommitMessage via WS
- * - If WebSocket is disconnected → POSTs to /api/read/commit
+ * - If WebSocket is connected → sends the flat ReadCommitMessage via WS
+ *   (server derives fanId/fixtureId from the authenticated connection)
+ * - If WebSocket is disconnected → POSTs to /api/read/commit (stateless,
+ *   needs the full context explicitly)
  *
  * @param readId - The unique read prompt identifier
  * @param predicted - The fan's prediction (0 = NO, 1 = YES)
- * @param fanId - The fan's unique identifier
- * @param wsSend - Optional WebSocket send function (injected by the socket hook)
+ * @param fanId - The fan's unique identifier (REST path only)
+ * @param fixtureId - The current fixture (REST path only)
+ * @param readType - The prompt's read type (REST path only)
+ * @param oddsAtCommit - The prompt's difficulty multiplier (REST path only)
+ * @param wsSend - Sends over the live WS connection; returns false if there's
+ *   no open connection (injected by the socket hook's sendReadCommit)
  * @returns The channel used and the result of the commit
  */
 export async function commitReadWithFallback(
   readId: string,
   predicted: number,
   fanId: string,
-  wsSend?: (message: ReadCommitMessage) => void,
+  fixtureId: number,
+  readType: string,
+  oddsAtCommit: number,
+  wsSend?: (readId: string, predicted: number) => boolean,
 ): Promise<{ channel: CommitChannel; result: ApiResult<ReadCommitPayload> }> {
   const { connected } = useCampfireStore.getState();
   const channel = getCommitChannel(connected);
-  const message = buildCommitMessage(readId, predicted, fanId);
+  const restPayload: ReadCommitPayload = {
+    readId,
+    predicted,
+    fanId,
+    fixtureId,
+    readType,
+    oddsAtCommit,
+  };
 
   if (channel === 'websocket' && wsSend) {
-    try {
-      wsSend(message);
+    const sent = wsSend(readId, predicted);
+    if (sent) {
       return {
         channel: 'websocket',
-        result: { ok: true, data: message.payload },
+        result: { ok: true, data: restPayload },
       };
-    } catch (error) {
-      // WS send failed — fall through to REST
-      const restResult = await postReadCommit(message.payload);
-      return { channel: 'rest', result: restResult };
     }
+    // No open WS connection despite `connected` state — fall through to REST.
   }
 
   // REST fallback path
-  const restResult = await postReadCommit(message.payload);
+  const restResult = await postReadCommit(restPayload);
   return { channel: 'rest', result: restResult };
 }

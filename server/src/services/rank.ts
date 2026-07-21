@@ -31,7 +31,7 @@ export class RankService {
   /** In-memory rank store keyed by tribeId */
   private ranks: Map<string, TribeRankEntry> = new Map();
 
-  /** Mock tribes data (replace with on-chain/Supabase query later) */
+  /** Real tribe data, populated by index.ts's refreshTribeRanks() from the `fans` table + on-chain standing (see setTribes()) — empty only until the first refresh cycle runs. */
   private tribes: TribeData[] = [];
 
   /** Interval handle */

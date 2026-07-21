@@ -16,6 +16,11 @@ import { View, StyleSheet } from "react-native";
 import "react-native-reanimated";
 import { AuthProvider } from "../providers/AuthProvider";
 import { ThemeProvider, useTheme } from "../providers/ThemeProvider";
+// TEMPORARY — live-demo testing only, remove before shipping. Injects a real
+// (already server-registered) fan session directly into useAuthStore so the
+// Campfire WebSocket has a real, non-empty tribeId without needing to
+// complete a real Privy OTP/OAuth flow in this environment.
+import { useAuthStore } from "../stores/useAuthStore";
 
 export { ErrorBoundary } from "expo-router";
 
@@ -56,6 +61,29 @@ export default function RootLayout() {
       SplashScreen.hideAsync();
     }
   }, [loaded, error]);
+
+  // TEMPORARY — see import comment above. Was flipped on to skip onboarding
+  // while recording the demo video; reverted now that recording is done.
+  const DEV_AUTO_LOGIN = false;
+  useEffect(() => {
+    if (!DEV_AUTO_LOGIN) return;
+    useAuthStore.setState({
+      fan: {
+        fanId: "fd852897-e431-4dbe-9f22-0c09ffb67f23",
+        privyUserId: "demo-live-test-user",
+        tribeId: "argentina-argentina-hyderabad",
+        tribeName: "Argentina · Hyderabad",
+        macroTribe: "Argentina",
+        standing: 100,
+        titles: 0,
+        readsCorrect: 0,
+        readsTotal: 0,
+        currentStreak: 0,
+      },
+      token: "demo-live-test-token",
+      isOnboarded: true,
+    });
+  }, []);
 
   if (!loaded && !error) {
     return null;

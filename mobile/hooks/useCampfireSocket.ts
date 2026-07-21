@@ -10,6 +10,7 @@ import type {
   KeeperInjectPayload,
   StandingUpdatePayload,
   ShareCardReadyPayload,
+  MatchHeaderPayload,
 } from "../types";
 import type { ReadPromptPayload } from "../types";
 
@@ -38,6 +39,10 @@ export function getBackoffDelay(attempt: number): number {
 interface UseCampfireSocketParams {
   tribeId: string;
   fixtureId: string;
+  /** Passed as a ?fanId= query param so the server can authenticate the
+   *  connection for read_commit — without this every connection is
+   *  anonymous server-side and WS-based commits are silently rejected. */
+  fanId?: string;
 }
 
 interface UseCampfireSocketReturn {
@@ -46,6 +51,9 @@ interface UseCampfireSocketReturn {
   retry: () => void;
   isConnected: boolean;
   isOffline: boolean;
+  /** Sends a real read_commit message over the live WS connection. Returns
+   *  false (caller should fall back to REST) if there's no open connection. */
+  sendReadCommit: (readId: string, predicted: number) => boolean;
 }
 
 // ─── Hook ────────────────────────────────────────────────────────────────────
@@ -53,6 +61,7 @@ interface UseCampfireSocketReturn {
 export function useCampfireSocket({
   tribeId,
   fixtureId,
+  fanId,
 }: UseCampfireSocketParams): UseCampfireSocketReturn {
   const wsRef = useRef<WebSocket | null>(null);
   const pingTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -115,6 +124,12 @@ export function useCampfireSocket({
             shareCard: msg.payload as ShareCardReadyPayload,
           });
           break;
+
+        case "match_header":
+          useCampfireStore.setState({
+            matchHeader: msg.payload as MatchHeaderPayload,
+          });
+          break;
       }
     },
     []
@@ -154,7 +169,8 @@ export function useCampfireSocket({
       wsRef.current = null;
     }
 
-    const url = `${WS_URL}?tribeId=${encodeURIComponent(tribeId)}&fixtureId=${encodeURIComponent(fixtureId)}`;
+    const fanIdParam = fanId ? `&fanId=${encodeURIComponent(fanId)}` : "";
+    const url = `${WS_URL}?tribeId=${encodeURIComponent(tribeId)}&fixtureId=${encodeURIComponent(fixtureId)}${fanIdParam}`;
     const ws = new WebSocket(url);
     wsRef.current = ws;
 
@@ -191,7 +207,7 @@ export function useCampfireSocket({
     ws.onerror = () => {
       // onclose fires after onerror; reconnection handled there
     };
-  }, [tribeId, fixtureId, startPing, stopPing, updateStore]);
+  }, [tribeId, fixtureId, fanId, startPing, stopPing, updateStore]);
 
   // ─── Reconnection with Exponential Backoff ───────────────────────────────────
 
@@ -247,6 +263,15 @@ export function useCampfireSocket({
     useCampfireStore.setState({ connected: false, reconnectAttempts: 0 });
   }, [stopPing]);
 
+  // ─── Read Commit ─────────────────────────────────────────────────────────────
+
+  const sendReadCommit = useCallback((readId: string, predicted: number): boolean => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    ws.send(JSON.stringify({ type: "read_commit", readId, predicted }));
+    return true;
+  }, []);
+
   // ─── Lifecycle: connect on mount, disconnect on unmount ──────────────────────
 
   useEffect(() => {
@@ -265,5 +290,6 @@ export function useCampfireSocket({
     retry,
     isConnected,
     isOffline,
+    sendReadCommit,
   };
 }

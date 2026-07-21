@@ -36,8 +36,7 @@ export function ReplayFixtureList() {
       setError(
         err instanceof Error ? err.message : "Failed to load replay fixtures"
       );
-      // Provide mock fixtures for development/offline fallback
-      setFixtures(MOCK_HISTORICAL_FIXTURES);
+      setFixtures([]);
     } finally {
       setIsLoading(false);
     }
@@ -111,9 +110,9 @@ export function ReplayFixtureList() {
       </View>
 
       {error && (
-        <View className="mx-4 mb-3 bg-solar-yellow/10 rounded-lg px-3 py-2">
-          <Text className="text-solar-yellow text-xs">
-            Using offline data • {error}
+        <View className="mx-4 mb-3 bg-solar-red/10 rounded-lg px-3 py-2">
+          <Text className="text-solar-red text-xs">
+            Couldn't load replays • {error}
           </Text>
         </View>
       )}
@@ -137,53 +136,3 @@ export function ReplayFixtureList() {
     </View>
   );
 }
-
-// ─── Mock fixtures for development / offline fallback ─────────────────────────
-
-const MOCK_HISTORICAL_FIXTURES: Fixture[] = [
-  {
-    fixtureId: 1001,
-    sport: "football",
-    league: "World Cup 2026 – Group A",
-    homeTeam: "Brazil",
-    awayTeam: "Argentina",
-    kickoff: "2026-06-14T20:00:00Z",
-    state: "finished",
-  },
-  {
-    fixtureId: 1002,
-    sport: "football",
-    league: "World Cup 2026 – Group B",
-    homeTeam: "Germany",
-    awayTeam: "France",
-    kickoff: "2026-06-15T17:00:00Z",
-    state: "finished",
-  },
-  {
-    fixtureId: 1003,
-    sport: "football",
-    league: "World Cup 2026 – Group C",
-    homeTeam: "England",
-    awayTeam: "Spain",
-    kickoff: "2026-06-16T20:00:00Z",
-    state: "finished",
-  },
-  {
-    fixtureId: 1004,
-    sport: "football",
-    league: "World Cup 2026 – Group D",
-    homeTeam: "Japan",
-    awayTeam: "Mexico",
-    kickoff: "2026-06-17T14:00:00Z",
-    state: "finished",
-  },
-  {
-    fixtureId: 1005,
-    sport: "football",
-    league: "World Cup 2026 – Group A",
-    homeTeam: "USA",
-    awayTeam: "Portugal",
-    kickoff: "2026-06-18T20:00:00Z",
-    state: "finished",
-  },
-];
